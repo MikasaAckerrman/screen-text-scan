@@ -71,12 +71,15 @@ public final class Permissions {
      * и сообщать надо именно об этом, иначе человек ищет проблему не там.
      */
     public static boolean isAccessibilityMasterOn(Context c) {
-        try {
-            return Settings.Secure.getInt(c.getContentResolver(),
-                    Settings.Secure.ACCESSIBILITY_ENABLED) == 1;
-        } catch (RuntimeException e) {
-            return true;    // настройки нет — считаем, что включено
-        }
+        /*
+         * Используем перегрузку С ДЕФОЛТОМ. Двухаргументная getInt бросает
+         * проверяемый SettingNotFoundException — это обнаружила полная
+         * локальная компиляция после восстановления ZoneSelectorView.
+         * Значение по умолчанию 1 соответствует прежнему намерению:
+         * отсутствие настройки не считать запретом.
+         */
+        return Settings.Secure.getInt(c.getContentResolver(),
+                Settings.Secure.ACCESSIBILITY_ENABLED, 1) == 1;
     }
 
     /** Всё ли готово к чтению. */
