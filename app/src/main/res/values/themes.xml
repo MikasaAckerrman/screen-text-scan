@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Тёмная тема без строки заголовка: экран настройки рисует свой. -->
+    <style name="Theme.Sts" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E0E10</item>
+    </style>
+
+    <!--
+      Тема переходника. Полностью прозрачная и без анимации: активность живёт
+      миллисекунды, и любая вспышка фона выглядела бы как сбой.
+    -->
+    <style name="Theme.Sts.Invisible" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

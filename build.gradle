@@ -1,0 +1,18 @@
+// Корневой build-файл. Версии вынесены сюда, чтобы модуль их не дублировал.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // 8.5.2 — последняя, что работает с Gradle 8.7 из wrapper'а.
+        classpath 'com.android.tools.build:gradle:8.5.2'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}

@@ -1,0 +1,65 @@
+name: build-apk
+
+# Сборка в CI, а не локально: в песочнице нет Android SDK, а поставить его
+# туда нельзя — нужен aapt2 под aarch64-musl, которого в поставке нет.
+# Здесь же SDK уже готов, и получается подписанный APK, который можно
+# скачать и поставить на телефон.
+
+on:
+  push:
+    branches: [main, screentextscan]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Gradle ставим действием, а не wrapper'ом: gradle-wrapper.jar —
+      # бинарник, и держать его в репозитории ради одной сборки незачем.
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      # Проверка чистой логики ДО сборки: накопитель текста не зависит от
+      # Android, поэтому его можно прогнать обычным javac. Если правило
+      # дедупликации сломано, сборка не нужна.
+      - name: Тест накопителя
+        run: |
+          mkdir -p /tmp/tacc
+          cp app/src/main/java/com/screentextscan/TextAccumulator.java /tmp/tacc/
+          cp tests/TextAccumulatorTest.java /tmp/tacc/
+          cd /tmp/tacc
+          sed -i 's/^package com.screentextscan;//' TextAccumulator.java
+          javac TextAccumulator.java TextAccumulatorTest.java
+          java TextAccumulatorTest
+
+      - name: Сборка release
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Переименовать по коммиту
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          SRC=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          cp "$SRC" "ScreenTextScan-$SHA.apk"
+          sha256sum "ScreenTextScan-$SHA.apk"
+          ls -l "ScreenTextScan-$SHA.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: ScreenTextScan-*.apk
+          if-no-files-found: error

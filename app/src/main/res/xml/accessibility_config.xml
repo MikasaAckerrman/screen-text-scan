@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Настройка службы доступности.
+
+  canRetrieveWindowContent — единственное, что нам нужно: читать содержимое
+  окна. Жесты и нажатия НЕ запрашиваем, приложение ничего не нажимает.
+
+  notificationTimeout=100 и типы событий заданы минимально: сама служба
+  события не обрабатывает (читает по запросу), но система требует хотя бы
+  один тип. typeWindowStateChanged — самый редкий из подходящих, значит
+  лишних вызовов почти не будет.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/a11y_description"
+    android:notificationTimeout="100" />

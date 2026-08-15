@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Текст с экрана</string>
+    <string name="tile_label">Текст с экрана</string>
+    <string name="a11y_label">Чтение с экрана</string>
+    <string name="a11y_description">Читает текст из элементов активного окна, когда вы запускаете чтение. Ничего не нажимает и не отправляет наружу.</string>
+</resources>
