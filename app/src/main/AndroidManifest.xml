@@ -22,6 +22,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      Модель перевода скачивается один раз. Разрешение обычное, диалога не
+      требует, но без него загрузка молча не пойдёт.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -71,10 +78,16 @@
           Служба доступности — источник текста. Она НЕ распознаёт картинку:
           читает строки из дерева элементов приложения, поэтому текст
           получается точным, а один опрос стоит около 50 мс.
+
+          directBootAware: служба должна значиться включённой сразу после
+          перезагрузки, до разблокировки. Без этого система в некоторых
+          прошивках снимает её из списка активных при первом же перезапуске —
+          отсюда и жалоба «после перезахода надо выдавать разрешение снова».
         -->
         <service
             android:name=".ScanAccessibilityService"
             android:exported="true"
+            android:directBootAware="true"
             android:label="@string/a11y_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>

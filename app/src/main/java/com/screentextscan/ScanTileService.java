@@ -3,28 +3,23 @@ package com.screentextscan;
 import android.app.PendingIntent;
 import android.content.Intent;
 import android.os.Build;
-import android.provider.Settings;
 import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
 
 /**
- * Плитка в панели быстрых настроек — то, ради чего нужен APK.
+ * Плитка в панели быстрых настроек.
  *
- * ПОЧЕМУ ТОЛЬКО ТАК. Плитка — системная сущность: её объявляет манифест
- * приложения, и добавить её в панель извне нельзя ничем. Пользователь один
- * раз перетаскивает её в панель, дальше чтение запускается двумя жестами:
- * потянуть шторку, нажать плитку.
+ * ЧТО ЗДЕСЬ БЫЛО СЛОМАНО. Готовность определялась по статической ссылке на
+ * службу доступности, а она пуста в свежесозданном процессе. Система убивает
+ * процесс приложения постоянно — оно ей не нужно, — поэтому после каждого
+ * такого убийства плитка считала службу выключенной и ставила себе
+ * STATE_UNAVAILABLE. Плитка в этом состоянии в Android физически не
+ * нажимается: отсюда «если приложение не запущено, через плитку не вызвать».
  *
- * ГЛАВНАЯ ТОНКОСТЬ, ОПРЕДЕЛИВШАЯ УСТРОЙСТВО КЛАССА. Шторку обязательно надо
- * закрыть ДО начала чтения: пока она открыта, активное окно — это она, и
- * служба доступности прочитает саму шторку вместо приложения под ней.
- * Публичного «закрой панель» в API нет; закрытие происходит как побочный
- * эффект `startActivityAndCollapse`. Поэтому плитка запускает не сервис
- * напрямую, а невидимую активность-переходник (LaunchActivity), которая уже
- * поднимает сервис и сразу закрывается.
- *
- * И вторая тонкость: с Android 14 версия `startActivityAndCollapse(Intent)`
- * запрещена и бросает исключение — обязателен вариант с PendingIntent.
+ * Теперь состояние берётся из системной настройки (см. Permissions), и
+ * плитка НИКОГДА не бывает недоступной: если разрешений нет, она остаётся
+ * нажимаемой и ведёт на экран настройки. Даже при неверном определении
+ * готовности пользователь не окажется в тупике.
  */
 public class ScanTileService extends TileService {
 
@@ -33,11 +28,22 @@ public class ScanTileService extends TileService {
         super.onStartListening();
         Tile t = getQsTile();
         if (t == null) return;
-        boolean ready = ScanAccessibilityService.get() != null
-                && Settings.canDrawOverlays(this);
-        // Недоступная плитка выглядит серой — это честный сигнал «не настроено».
-        t.setState(ready ? Tile.STATE_INACTIVE : Tile.STATE_UNAVAILABLE);
+
+        boolean ready = Permissions.ready(this);
+        /*
+         * STATE_INACTIVE в обоих случаях — намеренно. Разница только в
+         * подписи. STATE_UNAVAILABLE не используем нигде: он делает плитку
+         * ненажимаемой, а значит лишает единственного способа узнать, чего
+         * не хватает.
+         */
+        t.setState(Tile.STATE_INACTIVE);
         t.setLabel(getString(R.string.tile_label));
+        t.setContentDescription(ready
+                ? "Начать чтение текста с экрана"
+                : "Нужна настройка — нажмите");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            t.setSubtitle(ready ? null : "нужна настройка");
+        }
         t.updateTile();
     }
 
@@ -45,20 +51,27 @@ public class ScanTileService extends TileService {
     public void onClick() {
         super.onClick();
 
-        // Не настроено — ведём в настройку, а не молча ничего не делаем.
-        boolean ready = ScanAccessibilityService.get() != null
-                && Settings.canDrawOverlays(this);
-
+        /*
+         * Куда ведём. Если чего-то не хватает — на экран настройки, он
+         * показывает, что именно. Если всё есть — в невидимый переходник,
+         * который поднимает сервис.
+         *
+         * ПОЧЕМУ НЕ СЕРВИС НАПРЯМУЮ: панель быстрых настроек закрывается
+         * только как побочный эффект запуска АКТИВНОСТИ. Пока панель
+         * открыта, активное окно — это она, и служба доступности прочитает
+         * саму панель вместо приложения под ней.
+         */
+        boolean ready = Permissions.ready(this);
         Intent target = ready
                 ? new Intent(this, LaunchActivity.class)
                 : new Intent(this, MainActivity.class);
         target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
-        PendingIntent pi = PendingIntent.getActivity(
-                this, 0, target,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // С Android 14 вариант с Intent запрещён и бросает исключение.
+            PendingIntent pi = PendingIntent.getActivity(
+                    this, 0, target,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             startActivityAndCollapse(pi);
         } else {
             collapseLegacy(target);
@@ -66,10 +79,9 @@ public class ScanTileService extends TileService {
     }
 
     /**
-     * Ветка для Android 13 и ниже. Вынесена в отдельный метод с подавлением
-     * предупреждения: вариант с Intent там ЕДИНСТВЕННЫЙ рабочий (версии с
-     * PendingIntent ещё нет), а на 14+ он бросает исключение — поэтому
-     * условие по версии выше обязательно.
+     * Ветка для Android 13 и ниже: там варианта с PendingIntent ещё нет,
+     * а вариант с Intent — единственный рабочий. На 14+ он бросает
+     * исключение, поэтому условие по версии выше обязательно.
      */
     @SuppressWarnings("deprecation")
     private void collapseLegacy(Intent target) {
