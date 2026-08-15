@@ -284,10 +284,20 @@ public class OverlayService extends Service {
             if (svc != null) {
                 List<ScanAccessibilityService.Line> lines =
                         svc.readScreen(zone, screenW, screenH, false);
-                List<String> texts = new ArrayList<>(lines.size());
+                /*
+                 * Порядок чтения. Служба доступности обходит дерево по
+                 * вложенности элементов, а не сверху вниз — без сортировки
+                 * строки копировались бы вперемешку. ReadingOrder.sort
+                 * раскладывает их по строкам-полосам сверху вниз, слева
+                 * направо, а виртуальные (WebView, координаты от начала
+                 * документа) выносит отдельной группой в конец, чтобы они не
+                 * перемешались с экранными.
+                 */
+                List<ReadingOrder.Item> items = new ArrayList<>(lines.size());
                 for (ScanAccessibilityService.Line l : lines) {
-                    texts.add(l.text);
+                    items.add(new ReadingOrder.Item(l.text, l.bounds, l.virtual));
                 }
+                List<String> texts = ReadingOrder.sort(items);
                 int added = acc.addAll(texts);
                 if (added > 0) lastNewAt = System.currentTimeMillis();
             }
