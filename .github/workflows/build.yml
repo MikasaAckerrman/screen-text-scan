@@ -79,6 +79,12 @@ jobs:
       - name: Сверка ресурсов
         run: python3 tests/check_resources.py
 
+      # Граф зависимостей. Первая сборка с ML Kit упала на дубликатах
+      # kotlin-stdlib, и это видно по POM-графу до сборки: скрипт обходит
+      # его и сверяет с блоком constraints.
+      - name: Сверка зависимостей
+        run: python3 tests/check_deps.py
+
       - name: Сборка release
         run: gradle assembleRelease --no-daemon --stacktrace
 

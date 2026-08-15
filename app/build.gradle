@@ -45,4 +45,26 @@ dependencies {
      * это ~1.5 МБ кода в APK, сами модели в APK НЕ входят.
      */
     implementation 'com.google.mlkit:translate:17.0.3'
+
+    /*
+     * ПОЧЕМУ ЭТИ ТРИ СТРОКИ ОБЯЗАТЕЛЬНЫ. Без них сборка падает на
+     * checkReleaseDuplicateClasses: ML Kit приносит kotlin-stdlib-jdk7 и
+     * -jdk8 версии 1.6.x, а androidx.core:1.13.1 — kotlin-stdlib 1.8.22.
+     * Начиная с Kotlin 1.8 классы из jdk7/jdk8 переехали в ОСНОВНОЙ stdlib,
+     * а старые артефакты их всё ещё содержат — получается по два
+     * `kotlin.io.path.PathsKt` и ещё двадцать дубликатов.
+     *
+     * Gradle сам не выравнивает: он выбирает старшую версию каждого
+     * артефакта по отдельности, и «старший stdlib + старый jdk8» — как раз
+     * то сочетание, которое конфликтует.
+     *
+     * Проверяется скриптом tests/check_deps.py: он обходит POM-графы и
+     * ловит именно это сочетание до сборки. Версия 1.8.22 — та, что тянет
+     * androidx.core, поэтому выравниваем по ней.
+     */
+    constraints {
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
 }
