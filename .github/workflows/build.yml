@@ -34,18 +34,50 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # Проверка чистой логики ДО сборки: накопитель текста не зависит от
-      # Android, поэтому его можно прогнать обычным javac. Если правило
-      # дедупликации сломано, сборка не нужна.
-      - name: Тест накопителя
+      # ---------------------------------------------------------------
+      # Проверка чистой логики ДО сборки. Оба проверяемых класса намеренно
+      # не зависят от Android: накопитель — вообще ни от чего, геометрия —
+      # только от Rect, который подменяется настоящей реализацией из
+      # tests/stub (в android.jar все методы бросают "Stub!").
+      #
+      # Если сломана дедупликация или ручки рамки, собирать APK не нужно.
+      # ---------------------------------------------------------------
+      - name: Тест накопителя текста
         run: |
-          mkdir -p /tmp/tacc
-          cp app/src/main/java/com/screentextscan/TextAccumulator.java /tmp/tacc/
-          cp tests/TextAccumulatorTest.java /tmp/tacc/
-          cd /tmp/tacc
+          mkdir -p /tmp/t1
+          cp app/src/main/java/com/screentextscan/TextAccumulator.java /tmp/t1/
+          cp tests/TextAccumulatorTest.java /tmp/t1/
+          cd /tmp/t1
           sed -i 's/^package com.screentextscan;//' TextAccumulator.java
-          javac TextAccumulator.java TextAccumulatorTest.java
-          java TextAccumulatorTest
+          javac -d out TextAccumulator.java TextAccumulatorTest.java
+          java -cp out TextAccumulatorTest
+
+      - name: Тест геометрии зоны
+        run: |
+          mkdir -p /tmp/t2/android/graphics
+          cp tests/stub/android/graphics/Rect.java /tmp/t2/android/graphics/
+          cp app/src/main/java/com/screentextscan/ZoneGeometry.java /tmp/t2/
+          cp tests/ZoneGeometryTest.java /tmp/t2/
+          cd /tmp/t2
+          sed -i 's/^package com.screentextscan;//' ZoneGeometry.java
+          javac -d out android/graphics/Rect.java ZoneGeometry.java ZoneGeometryTest.java
+          java -cp out ZoneGeometryTest
+
+      - name: Тест логики перевода
+        run: |
+          mkdir -p /tmp/t3
+          cp app/src/main/java/com/screentextscan/TextTranslatorLogic.java /tmp/t3/
+          cp tests/TextTranslatorTest.java /tmp/t3/
+          cd /tmp/t3
+          sed -i 's/^package com.screentextscan;//' TextTranslatorLogic.java
+          javac -d out TextTranslatorLogic.java TextTranslatorTest.java
+          java -cp out TextTranslatorTest
+
+      # Сверка ресурсов: каждая ссылка R.* и @string/... должна существовать.
+      # Отдельным шагом, потому что aapt2 сообщает об этом невнятно, а
+      # причина обычно — переименованный ресурс.
+      - name: Сверка ресурсов
+        run: python3 tests/check_resources.py
 
       - name: Сборка release
         run: gradle assembleRelease --no-daemon --stacktrace
