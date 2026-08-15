@@ -88,16 +88,29 @@ jobs:
       - name: Сборка release
         run: gradle assembleRelease --no-daemon --stacktrace
 
-      - name: Переименовать по коммиту
+      # ---------------------------------------------------------------
+      # Сборка даёт несколько APK: по одному на архитектуру плюс
+      # универсальный. Забираем все, но arm64 переименовываем понятно —
+      # именно он нужен для любого современного телефона, а универсальный
+      # весит втрое больше из-за копий libtranslate_jni.so.
+      # ---------------------------------------------------------------
+      - name: Собрать артефакты
         run: |
           SHA=$(git rev-parse --short HEAD)
-          SRC=$(find app/build/outputs/apk -name '*.apk' | head -1)
-          cp "$SRC" "ScreenTextScan-$SHA.apk"
-          sha256sum "ScreenTextScan-$SHA.apk"
-          ls -l "ScreenTextScan-$SHA.apk"
+          mkdir -p out
+          for f in $(find app/build/outputs/apk/release -name '*.apk'); do
+            case "$f" in
+              *arm64-v8a*)   cp "$f" "out/ScreenTextScan-$SHA-arm64.apk" ;;
+              *armeabi-v7a*) cp "$f" "out/ScreenTextScan-$SHA-arm32.apk" ;;
+              *universal*)   cp "$f" "out/ScreenTextScan-$SHA-universal.apk" ;;
+              *)             cp "$f" "out/ScreenTextScan-$SHA.apk" ;;
+            esac
+          done
+          ls -l out/
+          sha256sum out/*.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: ScreenTextScan-*.apk
+          path: out/*.apk
           if-no-files-found: error
