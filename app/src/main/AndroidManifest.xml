@@ -21,6 +21,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!--
       Модель перевода скачивается один раз. Разрешение обычное, диалога не
@@ -38,6 +40,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:excludeFromRecents="true"
             android:exported="true"
             android:label="@string/app_name">
             <intent-filter>
@@ -79,15 +82,13 @@
           читает строки из дерева элементов приложения, поэтому текст
           получается точным, а один опрос стоит около 50 мс.
 
-          directBootAware: служба должна значиться включённой сразу после
-          перезагрузки, до разблокировки. Без этого система в некоторых
-          прошивках снимает её из списка активных при первом же перезапуске —
-          отсюда и жалоба «после перезахода надо выдавать разрешение снова».
+          Доступность остаётся системным разрешением и переживает обычное
+          закрытие приложения. За удержание процесса на OriginOS отвечает
+          отдельный AccessibilityKeepAliveService ниже.
         -->
         <service
             android:name=".ScanAccessibilityService"
             android:exported="true"
-            android:directBootAware="true"
             android:label="@string/a11y_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
@@ -97,6 +98,30 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_config" />
         </service>
+
+        <!--
+          OriginOS может остановить accessibility-службу при удалении карточки
+          приложения из последних задач. Этот тихий sticky foreground-service
+          удерживает процесс, пока доступность включена пользователем.
+        -->
+        <service
+            android:name=".AccessibilityKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Удержание включённой пользователем службы доступности" />
+        </service>
+
+        <receiver
+            android:name=".KeepAliveReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Плитка в панели быстрых настроек: то, чем это запускается. -->
         <service

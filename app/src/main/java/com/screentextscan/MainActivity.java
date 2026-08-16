@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -42,6 +43,7 @@ public class MainActivity extends Activity {
     private boolean openingAccessibilitySettings;
 
     private TextView status;
+    private TextView persistenceStatus;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -80,7 +82,21 @@ public class MainActivity extends Activity {
                         + "события не отслеживает, поэтому в простое не расходует заряд.",
                 "Открыть настройку", v -> openAccessibilitySettings()));
 
-        root.addView(step("3. Плитка в быстрых настройках",
+        persistenceStatus = body("");
+        persistenceStatus.setPadding(0, dp(14), 0, 0);
+        root.addView(persistenceStatus);
+
+        root.addView(step("3. Защита службы на vivo",
+                "OriginOS отключает службы при полной очистке приложения. "
+                        + "Один раз включите ScreenTextScan в автозапуске и "
+                        + "снимите ограничение батареи.",
+                "Открыть автозапуск vivo", v -> openVivoAutostart()));
+
+        root.addView(step("4. Работа без ограничений",
+                "Разрешает Android не останавливать защиту службы в фоне.",
+                "Разрешить", v -> requestBatteryExemption()));
+
+        root.addView(step("5. Плитка в быстрых настройках",
                 "Потяните шторку, нажмите «Изменить» и перетащите плитку "
                         + "«Текст с экрана» к остальным. Дальше чтение запускается "
                         + "двумя жестами.",
@@ -108,6 +124,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refresh();
+        AccessibilityKeepAliveService.start(this);
 
         if (openingAccessibilitySettings) {
             // Возврат из настроек: показать статус, не отправлять туда снова.
@@ -151,6 +168,14 @@ public class MainActivity extends Activity {
         status.setText(s);
         status.setTextColor(overlay && a11yMaster && a11y
                 ? Color.parseColor("#30D158") : Color.parseColor("#FF9F0A"));
+
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean unrestricted = pm.isIgnoringBatteryOptimizations(getPackageName());
+        persistenceStatus.setText((unrestricted ? "✓" : "✗")
+                + " без ограничений батареи\n"
+                + "• автозапуск vivo: включите ScreenTextScan вручную");
+        persistenceStatus.setTextColor(unrestricted
+                ? Color.parseColor("#30D158") : Color.parseColor("#FF9F0A"));
     }
 
     private void openOverlaySettings() {
@@ -168,6 +193,39 @@ public class MainActivity extends Activity {
         } catch (ActivityNotFoundException | SecurityException ignored) {
             // Не все OEM-прошивки предоставляют страницу конкретной службы.
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        }
+    }
+
+    private void openVivoAutostart() {
+        Intent vivo = new Intent().setComponent(new ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"));
+        Intent iqoo = new Intent().setComponent(new ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"));
+        if (tryStart(vivo) || tryStart(iqoo)) return;
+
+        // Новый OriginOS может скрыть фирменную Activity. Карточка приложения
+        // остаётся ближайшим рабочим местом для автозапуска и батареи.
+        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + getPackageName())));
+    }
+
+    private boolean tryStart(Intent intent) {
+        try {
+            startActivity(intent);
+            return true;
+        } catch (ActivityNotFoundException | SecurityException ignored) {
+            return false;
+        }
+    }
+
+    private void requestBatteryExemption() {
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException | SecurityException ignored) {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
         }
     }
 

@@ -43,6 +43,7 @@ jobs:
       - name: Регрессии запуска и подписи
         run: |
           python3 tests/check_launch_flow.py
+          python3 tests/check_accessibility_persistence.py
           python3 tests/check_signing_config.py
 
       # ---------------------------------------------------------------

@@ -41,12 +41,19 @@ public class ScanAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        AccessibilityKeepAliveService.start(this);
     }
 
     @Override
     public boolean onUnbind(android.content.Intent intent) {
         instance = null;
         return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        if (instance == this) instance = null;
+        super.onDestroy();
     }
 
     @Override
