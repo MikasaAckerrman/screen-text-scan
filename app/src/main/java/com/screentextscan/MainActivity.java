@@ -94,13 +94,15 @@ public class MainActivity extends Activity {
 
     /** Состояние обоих разрешений одной строкой — сразу видно, чего не хватает. */
     private void refresh() {
-        boolean overlay = Settings.canDrawOverlays(this);
-        boolean a11y = ScanAccessibilityService.get() != null;
+        boolean overlay = Permissions.canOverlay(this);
+        boolean a11yMaster = Permissions.isAccessibilityMasterOn(this);
+        boolean a11y = Permissions.isAccessibilityEnabled(this);
         String s = (overlay ? "✓" : "✗") + " наложение поверх приложений\n"
-                + (a11y ? "✓" : "✗") + " служба доступности";
-        if (overlay && a11y) s += "\n\nВсё готово.";
+                + (a11yMaster && a11y ? "✓" : "✗") + " служба доступности";
+        if (!a11yMaster) s += " (общий переключатель выключен)";
+        if (overlay && a11yMaster && a11y) s += "\n\nВсё готово.";
         status.setText(s);
-        status.setTextColor(overlay && a11y
+        status.setTextColor(overlay && a11yMaster && a11y
                 ? Color.parseColor("#30D158") : Color.parseColor("#FF9F0A"));
     }
 
@@ -115,18 +117,22 @@ public class MainActivity extends Activity {
     }
 
     private void startScanNow() {
-        if (!Settings.canDrawOverlays(this) || ScanAccessibilityService.get() == null) {
-            refresh();
+        if (!Permissions.canOverlay(this)) {
+            openOverlaySettings();
             return;
         }
-        startForegroundService(new Intent(this, OverlayService.class)
-                .setAction(OverlayService.ACTION_START));
+        if (!Permissions.isAccessibilityMasterOn(this)
+                || !Permissions.isAccessibilityEnabled(this)) {
+            openAccessibilitySettings();
+            return;
+        }
         /*
-         * Себя убираем с экрана: читать надо чужое приложение, а не наше.
-         * moveTaskToBack вместо finish() — чтобы возврат «назад» привёл
-         * пользователя туда, откуда он пришёл.
+         * Используем тот же переходник, что и плитка. Он ждёт реального
+         * подключения службы после холодного запуска процесса, поэтому
+         * кнопка не отказывает молча, когда разрешение уже выдано, но
+         * ScanAccessibilityService ещё не успела создать свой экземпляр.
          */
-        moveTaskToBack(true);
+        startActivity(new Intent(this, LaunchActivity.class));
     }
 
     /* ---------- сборка интерфейса ---------- */

@@ -84,7 +84,8 @@ public final class Permissions {
 
     /** Всё ли готово к чтению. */
     public static boolean ready(Context c) {
-        return canOverlay(c) && isAccessibilityEnabled(c);
+        return canOverlay(c) && isAccessibilityMasterOn(c)
+                && isAccessibilityEnabled(c);
     }
 
     /**

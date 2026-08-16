@@ -56,6 +56,12 @@ public class LaunchActivity extends Activity {
         if (Permissions.isAccessibilityConnected()) {
             startForegroundService(new Intent(this, OverlayService.class)
                     .setAction(OverlayService.ACTION_START));
+            /*
+             * Убираем свою задачу, чтобы селектор зоны оказался над тем
+             * приложением, которое пользователь собирался читать. Это
+             * одинаково работает при запуске с плитки и с кнопки настройки.
+             */
+            moveTaskToBack(true);
             finish();
             return;
         }

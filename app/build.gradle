@@ -2,6 +2,23 @@ plugins {
     id 'com.android.application'
 }
 
+def ciRunNumber = System.getenv('GITHUB_RUN_NUMBER')
+def releaseStoreFile = System.getenv('STS_KEYSTORE_FILE')
+def releaseStorePassword = System.getenv('STS_KEYSTORE_PASSWORD')
+def releaseKeyAlias = System.getenv('STS_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('STS_KEY_PASSWORD')
+
+def releaseRequested = gradle.startParameter.taskNames.any { taskName ->
+    def name = taskName.tokenize(':').last().toLowerCase()
+    name == 'assemblerelease' || name == 'bundlerelease'
+}
+if (releaseRequested && [releaseStoreFile, releaseStorePassword,
+                         releaseKeyAlias, releaseKeyPassword].any {
+    it == null || it.isEmpty()
+}) {
+    throw new GradleException('Release signing environment is incomplete')
+}
+
 android {
     namespace 'com.screentextscan'
     compileSdk 34
@@ -11,17 +28,29 @@ android {
         minSdk 26          // TileService (плитка быстрых настроек) появилась в API 24,
                            // но 26 даёт нормальные каналы уведомлений и foreground-сервис
         targetSdk 34
-        versionCode 2
-        versionName '1.1'
+        // База защищает от downgrade даже если workflow когда-нибудь
+        // пересоздадут и GITHUB_RUN_NUMBER снова начнётся с единицы.
+        versionCode 10_000 + (ciRunNumber ? ciRunNumber.toInteger() : 0)
+        versionName '1.2'
+    }
+
+    signingConfigs {
+        release {
+            if (releaseStoreFile) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            // Подпись отладочным ключом: APK нужен для установки на своё
-            // устройство, а не для публикации. Иначе release-сборка выйдет
-            // неподписанной и не установится.
-            signingConfig signingConfigs.debug
+            // Один постоянный ключ хранится в GitHub Actions Secrets.
+            // Новый debug-ключ на каждом CI-run делал APK несовместимыми.
+            signingConfig signingConfigs.release
         }
     }
 

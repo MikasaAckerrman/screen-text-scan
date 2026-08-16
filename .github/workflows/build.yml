@@ -40,6 +40,11 @@ jobs:
       - name: Целостность Java исходников
         run: python3 tests/check_sources.py
 
+      - name: Регрессии запуска и подписи
+        run: |
+          python3 tests/check_launch_flow.py
+          python3 tests/check_signing_config.py
+
       # ---------------------------------------------------------------
       # Проверка чистой логики ДО сборки. Оба проверяемых класса намеренно
       # не зависят от Android: накопитель — вообще ни от чего, геометрия —
@@ -91,7 +96,19 @@ jobs:
       - name: Сверка зависимостей
         run: python3 tests/check_deps.py
 
+      - name: Восстановить постоянный ключ подписи
+        env:
+          STS_KEYSTORE_BASE64: ${{ secrets.STS_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$STS_KEYSTORE_BASE64"
+          printf '%s' "$STS_KEYSTORE_BASE64" | base64 --decode > app/sts-release.jks
+
       - name: Сборка release
+        env:
+          STS_KEYSTORE_FILE: sts-release.jks
+          STS_KEYSTORE_PASSWORD: ${{ secrets.STS_KEYSTORE_PASSWORD }}
+          STS_KEY_ALIAS: ${{ secrets.STS_KEY_ALIAS }}
+          STS_KEY_PASSWORD: ${{ secrets.STS_KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon --stacktrace
 
       # ---------------------------------------------------------------
@@ -114,6 +131,20 @@ jobs:
           done
           ls -l out/
           sha256sum out/*.apk
+
+      - name: Проверить сертификат каждого APK
+        run: |
+          EXPECTED=c491c6b0772c25b94e13ddd956d1b2e7bccef28983e443d4e49161a1dd4c586a
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          test -x "$APKSIGNER"
+          for f in out/*.apk; do
+            "$APKSIGNER" verify --verbose --print-certs "$f"
+            ACTUAL=$("$APKSIGNER" verify --print-certs "$f" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+            test "$ACTUAL" = "$EXPECTED" || {
+              echo "Неверная подпись $f: $ACTUAL" >&2
+              exit 1
+            }
+          done
 
       - uses: actions/upload-artifact@v4
         with:

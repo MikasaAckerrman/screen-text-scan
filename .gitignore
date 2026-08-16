@@ -2,5 +2,7 @@
 build/
 app/build/
 local.properties
+app/sts-release.jks
+app/.sts-keystore-password
 *.iml
 .idea/
