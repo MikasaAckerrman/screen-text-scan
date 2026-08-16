@@ -139,7 +139,8 @@ jobs:
           test -x "$APKSIGNER"
           for f in out/*.apk; do
             "$APKSIGNER" verify --verbose --print-certs "$f"
-            ACTUAL=$("$APKSIGNER" verify --print-certs "$f" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+            ACTUAL=$("$APKSIGNER" verify --print-certs "$f" \
+              | awk '/certificate SHA-256 digest:/ { print $NF; exit }')
             test "$ACTUAL" = "$EXPECTED" || {
               echo "Неверная подпись $f: $ACTUAL" >&2
               exit 1
