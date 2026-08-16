@@ -15,6 +15,24 @@ assert "ScanAccessibilityService.get()" not in main, (
 assert "if (!Permissions.canOverlay(this))" in main
 assert "openOverlaySettings();" in main
 assert "if (!Permissions.isAccessibilityMasterOn(this)" in main
+assert '"android.settings.ACCESSIBILITY_DETAILS_SETTINGS"' in main, (
+    "MainActivity must try to open this service's accessibility details page"
+)
+assert "Intent.EXTRA_COMPONENT_NAME" in main
+assert "new ComponentName(this, ScanAccessibilityService.class)" in main
+assert "catch (ActivityNotFoundException | SecurityException" in main, (
+    "OEMs may not implement the service details action; keep a safe fallback"
+)
+assert "autoAccessibilityArmed" in main and "openingAccessibilitySettings" in main, (
+    "automatic settings opening must be re-armed without trapping Back navigation"
+)
+assert "onSaveInstanceState" in main and "b.getBoolean(" in main, (
+    "process recreation while Settings is open must not create a redirect loop"
+)
+assert main.count("STATE_OPENING_ACCESSIBILITY") >= 3
+assert "protected void onStop()" in main and "if (!openingAccessibilitySettings)" in main, (
+    "opening the launcher icon again after backgrounding must re-arm the redirect"
+)
 assert "openAccessibilitySettings();" in main
 assert "new Intent(this, LaunchActivity.class)" in main, (
     "MainActivity must use LaunchActivity's service wait path"
