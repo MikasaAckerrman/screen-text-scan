@@ -3,7 +3,7 @@
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-java = root / "app" / "src" / "main" / "java" / "com" / "screentextscan"
+java = root / "app/src/main/java/com/screentextscan"
 main = (java / "MainActivity.java").read_text(encoding="utf-8")
 permissions = (java / "Permissions.java").read_text(encoding="utf-8")
 launch = (java / "LaunchActivity.java").read_text(encoding="utf-8")
@@ -23,16 +23,14 @@ assert "new ComponentName(this, ScanAccessibilityService.class)" in main
 assert "catch (ActivityNotFoundException | SecurityException" in main, (
     "OEMs may not implement the service details action; keep a safe fallback"
 )
-assert "autoAccessibilityArmed" in main and "openingAccessibilitySettings" in main, (
-    "automatic settings opening must be re-armed without trapping Back navigation"
+# auto-open removed: it was throwing users to settings on every app resume
+assert "autoAccessibilityArmed" not in main, (
+    "auto-open settings was removed — it threw users to accessibility settings "
+    "on every app resume after minimizing, even when accessibility was enabled"
 )
-assert "onSaveInstanceState" in main and "b.getBoolean(" in main, (
-    "process recreation while Settings is open must not create a redirect loop"
-)
-assert main.count("STATE_OPENING_ACCESSIBILITY") >= 3
-assert "protected void onStop()" in main and "if (!openingAccessibilitySettings)" in main, (
-    "opening the launcher icon again after backgrounding must re-arm the redirect"
-)
+assert "openingAccessibilitySettings" not in main
+assert "onSaveInstanceState" not in main
+assert "protected void onStop()" not in main or "autoAccessibilityArmed" not in main
 assert "openAccessibilitySettings();" in main
 assert "new Intent(this, LaunchActivity.class)" in main, (
     "MainActivity must use LaunchActivity's service wait path"

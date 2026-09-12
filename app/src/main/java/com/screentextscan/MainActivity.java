@@ -31,28 +31,12 @@ import android.widget.TextView;
  */
 public class MainActivity extends Activity {
 
-    private static final String STATE_OPENING_ACCESSIBILITY =
-            "opening_accessibility_settings";
-
-    /**
-     * Флаг на один жизненный цикл Activity. При первом открытии ярлыка
-     * отправляем прямо к выключенной службе, но после возврата по Back не
-     * зацикливаем пользователя между приложением и системными настройками.
-     */
-    private boolean autoAccessibilityArmed = true;
-    private boolean openingAccessibilitySettings;
-
     private TextView status;
     private TextView persistenceStatus;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        if (b != null) {
-            openingAccessibilitySettings = b.getBoolean(
-                    STATE_OPENING_ACCESSIBILITY, false);
-            autoAccessibilityArmed = !openingAccessibilitySettings;
-        }
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -125,35 +109,6 @@ public class MainActivity extends Activity {
         super.onResume();
         refresh();
         AccessibilityKeepAliveService.start(this);
-
-        if (openingAccessibilitySettings) {
-            // Возврат из настроек: показать статус, не отправлять туда снова.
-            openingAccessibilitySettings = false;
-            autoAccessibilityArmed = false;
-            return;
-        }
-        if (autoAccessibilityArmed
-                && (!Permissions.isAccessibilityMasterOn(this)
-                || !Permissions.isAccessibilityEnabled(this))) {
-            autoAccessibilityArmed = false;
-            openAccessibilitySettings();
-        }
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        if (!openingAccessibilitySettings) {
-            // Обычное сворачивание: следующее открытие ярлыка снова помогает.
-            autoAccessibilityArmed = true;
-        }
-    }
-
-    @Override
-    protected void onSaveInstanceState(Bundle outState) {
-        outState.putBoolean(STATE_OPENING_ACCESSIBILITY,
-                openingAccessibilitySettings);
-        super.onSaveInstanceState(outState);
     }
 
     /** Состояние обоих разрешений одной строкой — сразу видно, чего не хватает. */
@@ -184,7 +139,6 @@ public class MainActivity extends Activity {
     }
 
     private void openAccessibilitySettings() {
-        openingAccessibilitySettings = true;
         Intent details = new Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS")
                 .putExtra(Intent.EXTRA_COMPONENT_NAME,
                         new ComponentName(this, ScanAccessibilityService.class));
