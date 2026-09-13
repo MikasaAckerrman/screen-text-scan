@@ -80,8 +80,8 @@ public class OverlayService extends Service {
     private boolean finished;
     private long lastNewAt;
     private int screenW, screenH;
-    /** Ориентация, при которой выбиралась зона — нужна для пересчёта. */
-    private int lastRotationW, lastRotationH;
+    /** Пакет приложения, которое читаем. При смене — останавливаем скан. */
+    private String scanningPackage;
 
     @Override
     public void onCreate() {
@@ -275,6 +275,9 @@ public class OverlayService extends Service {
         scanning = true;
         finished = false;
         lastNewAt = System.currentTimeMillis();
+        // Запоминаем, какое приложение читаем. При смене окна — стоп.
+        ScanAccessibilityService svc = ScanAccessibilityService.get();
+        scanningPackage = svc == null ? null : svc.getActiveWindowPackage();
         showBubble();
         updateNotification("Читаю. Листайте текст.");
         ui.postDelayed(poll, POLL_MS);
@@ -286,6 +289,16 @@ public class OverlayService extends Service {
             if (!scanning) return;
             ScanAccessibilityService svc = ScanAccessibilityService.get();
             if (svc != null) {
+                // Остановить скан, если пользователь покинул приложение —
+                // иначе poll прочитает домашний экран со всеми иконками.
+                String currentPkg = svc.getActiveWindowPackage();
+                if (scanningPackage != null && currentPkg != null
+                        && !scanningPackage.equals(currentPkg)
+                        && !"com.screentextscan".equals(currentPkg)) {
+                    finishScanning();
+                    return;
+                }
+
                 List<ScanAccessibilityService.Line> lines =
                         svc.readScreen(zone, screenW, screenH, false);
                 /*
@@ -476,6 +489,7 @@ public class OverlayService extends Service {
 
     private void stopEverything() {
         scanning = false;
+        scanningPackage = null;
         ui.removeCallbacks(poll);
         removeZoneView();
         if (bubble != null) {

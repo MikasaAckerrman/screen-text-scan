@@ -105,6 +105,18 @@ public class ScanAccessibilityService extends AccessibilityService {
     }
 
     /**
+     * Пакет активного окна. Нужен, чтобы остановить сканирование, когда
+     * пользователь покинул приложение — иначе poll продолжит читать
+     * домашний экран и соберёт все иконки и виджеты.
+     */
+    public String getActiveWindowPackage() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        CharSequence pkg = root.getPackageName();
+        return pkg == null ? null : pkg.toString();
+    }
+
+    /**
      * Рекурсивный обход. Глубина ограничена: у некоторых приложений дерево
      * зацикливается на самоссылающихся узлах, и без предела обход не
      * заканчивается.
