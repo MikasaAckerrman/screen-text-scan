@@ -63,6 +63,12 @@ public class ScanBubbleView extends View {
     private float readiness;
     private boolean complete;
 
+    // --- анимация крестика при завершении ---
+    private boolean crossAnimating = false;
+    private long crossAnimStart;
+    private static final long CROSS_MS = 500;
+    private final List<float[]> crossBurst = new ArrayList<>();
+
     // press
     private float pressScale = 1.0f;
     private float glowAlpha = 0f;
@@ -122,6 +128,17 @@ public class ScanBubbleView extends View {
     public void setCount(int c) { count = c; invalidate(); }
     public void setReadiness(float r, boolean done) {
         readiness = r < 0 ? 0 : (r > 1 ? 1 : r);
+        if (done && !complete) {
+            // Запустить анимацию крестика при первом достижении готовности.
+            crossAnimating = true;
+            crossAnimStart = System.currentTimeMillis();
+            crossBurst.clear();
+            for (int i = 0; i < 12; i++) {
+                float a = (float) (i * 2 * Math.PI / 12) + rnd.nextFloat() * 0.3f;
+                int col = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
+                crossBurst.add(new float[]{a, 0, dp(1.5f + rnd.nextFloat() * 2f), col});
+            }
+        }
         complete = done;
         invalidate();
     }
@@ -276,7 +293,7 @@ public class ScanBubbleView extends View {
         if (readiness > 0) c.drawArc(tmpRect, -90, 360 * readiness, false, ring);
 
         if (complete) {
-            drawTick(c, cx, cy, r * 0.42f);
+            drawCross(c, cx, cy, r);
         } else {
             num.setTextSize(sp(count >= 100 ? 15 : 18));
             float textH = num.ascent() + num.descent();
@@ -449,12 +466,56 @@ public class ScanBubbleView extends View {
         }
     }
 
-    private void drawTick(Canvas c, float cx, float cy, float size) {
-        tmpPath.reset();
-        tmpPath.moveTo(cx - size * 0.55f, cy - size * 0.05f);
-        tmpPath.lineTo(cx - size * 0.12f, cy + size * 0.42f);
-        tmpPath.lineTo(cx + size * 0.62f, cy - size * 0.48f);
-        c.drawPath(tmpPath, tick);
+    /**
+     * Анимированный крестик: рисуется от центра наружу с glow,
+     * при появлении — вспышка частиц.
+     */
+    private void drawCross(Canvas c, float cx, float cy, float r) {
+        float progress = 1f;
+        float burstP = 1f;
+        if (crossAnimating) {
+            long elapsed = System.currentTimeMillis() - crossAnimStart;
+            progress = Math.min(1f, (float) elapsed / CROSS_MS);
+            burstP = Math.min(1f, (float) elapsed / 600f);
+            if (progress >= 1f && burstP >= 1f) crossAnimating = false;
+            else invalidate();
+        }
+
+        float len = r * 0.42f * progress;
+        // easing — лёгкий overshoot
+        if (progress < 1f) len = r * 0.42f * (1f - (1f - progress) * (1f - progress));
+
+        float s = len * 0.7f;
+
+        // glow под крестом
+        tmpPaint.set(tick);
+        tmpPaint.setStrokeWidth(dp(4));
+        tmpPaint.setColor(0x446688FF);
+        c.drawLine(cx - s, cy - s, cx + s, cy + s, tmpPaint);
+        c.drawLine(cx + s, cy - s, cx - s, cy + s, tmpPaint);
+
+        // ядро креста — белое
+        tick.setStrokeWidth(dp(2));
+        tick.setColor(0xFFFFFFFF);
+        c.drawLine(cx - s, cy - s, cx + s, cy + s, tick);
+        c.drawLine(cx + s, cy - s, cx - s, cy + s, tick);
+
+        // частицы-вспышка при появлении
+        if (crossAnimating && burstP < 1f) {
+            for (float[] bp : crossBurst) {
+                float angle = bp[0], size = bp[2];
+                int color = (int) bp[3];
+                float dist = r * 0.3f + burstP * r * 1.2f;
+                float x = cx + (float) Math.cos(angle) * dist;
+                float y = cy + (float) Math.sin(angle) * dist;
+                float sz = size * (1f - burstP);
+                int a = (int) (Color.alpha(color) * (1f - burstP));
+                if (a <= 0 || sz <= 0) continue;
+                dotPaint.setColor(color);
+                dotPaint.setAlpha(a);
+                c.drawCircle(x, y, sz, dotPaint);
+            }
+        }
     }
 
     private float dp(float v) {
