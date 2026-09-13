@@ -7,6 +7,8 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -57,7 +59,16 @@ public class AccessibilityKeepAliveService extends Service {
             stopSelf();
             return;
         }
-        startForeground(NOTIFICATION_ID, buildNotification());
+        Notification n = buildNotification();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Android 14+: specialUse-сервис БЕЗ типа бросает
+            // MissingForegroundServiceTypeException → краш процесса →
+            // служба доступности помечается Crashed → не переподключается.
+            startForeground(NOTIFICATION_ID, n,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(NOTIFICATION_ID, n);
+        }
         handler.postDelayed(permissionCheck, CHECK_INTERVAL_MS);
     }
 

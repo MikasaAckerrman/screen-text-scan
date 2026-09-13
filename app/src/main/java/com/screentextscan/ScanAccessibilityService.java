@@ -41,6 +41,7 @@ public class ScanAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        android.util.Log.d("ScreenTextScan", "a11y onServiceConnected");
         AccessibilityKeepAliveService.start(this);
     }
 
