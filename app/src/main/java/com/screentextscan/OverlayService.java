@@ -9,9 +9,12 @@ import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -418,8 +421,8 @@ public class OverlayService extends Service {
                                 if (!moved && finished && bubble != null) {
                                     longPressHandled = true;
                                     bubble.cancelLongPressAnim();
-                                    // Убрать кружок с экрана — не открывать приложение.
-                                    stopEverything();
+                                    vibrate(true);
+                                    bubble.pop(() -> stopEverything());
                                 }
                             }, 2500);
                         }
@@ -454,8 +457,12 @@ public class OverlayService extends Service {
         if (scanning) {
             finishScanning();
         } else if (finished) {
-            // Тап по кнопке «Копировать» → сразу в буфер, шарик исчезает.
-            copyToClipboard();
+            // Тап по кнопке «Копировать» → вибрация → pop-анимация → буфер → убрать.
+            vibrate(false);
+            bubble.pop(() -> {
+                copyToClipboard();
+                stopEverything();
+            });
         }
     }
 
@@ -529,6 +536,22 @@ public class OverlayService extends Service {
             case 1: return "строка";
             case 2: case 3: case 4: return "строки";
             default: return "строк";
+        }
+    }
+
+    /**
+     * Качественная тактильная отдача.
+     * @param strong true для долгого зажатия (сильнее), false для копирования (легче).
+     */
+    private void vibrate(boolean strong) {
+        Vibrator v = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+        if (v == null || !v.hasVibrator()) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            v.vibrate(VibrationEffect.createPredefined(
+                    strong ? VibrationEffect.EFFECT_CLICK : VibrationEffect.EFFECT_TICK));
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            v.vibrate(VibrationEffect.createOneShot(
+                    strong ? 30 : 15, strong ? 180 : 120));
         }
     }
 

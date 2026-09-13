@@ -8,6 +8,7 @@ import android.graphics.Path;
 import android.graphics.RectF;
 import android.util.TypedValue;
 import android.view.View;
+import android.view.animation.OvershootInterpolator;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -65,6 +66,19 @@ public class ScanBubbleView extends View {
     private boolean pressing;
     private float pressProgress; // 0..1 за 2.5с
     private float pulse;          // лёгкая пульсация
+
+    // --- анимация лопающегося пузыря ---
+    private static final long POP_MS = 380;
+    private boolean popping = false;
+    private long popStart;
+    private float popProgress; // 0..1
+    private final List<BurstParticle> burst = new ArrayList<>();
+    private Runnable onPopDone;
+
+    private static class BurstParticle {
+        float angle, dist, size;
+        int color;
+    }
 
     private static class Spark {
         float angle;    // направление от центра
@@ -139,6 +153,28 @@ public class ScanBubbleView extends View {
         return pressing && System.currentTimeMillis() - pressStart >= LONG_PRESS_MS;
     }
 
+    /**
+     * Анимация лопающегося пузыря: лёгкое расширение → burst-частицы
+     * разлетаются наружу → всё затухает. После завершения вызывает callback.
+     */
+    public void pop(Runnable done) {
+        onPopDone = done;
+        popping = true;
+        popStart = System.currentTimeMillis();
+        popProgress = 0;
+        // частицы разлетаются наружу от центра
+        burst.clear();
+        for (int i = 0; i < 18; i++) {
+            BurstParticle p = new BurstParticle();
+            p.angle = (float) (i * (2 * Math.PI / 18)) + rnd.nextFloat() * 0.4f;
+            p.dist = 0;
+            p.size = dp(2 + rnd.nextFloat() * 3);
+            p.color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
+            burst.add(p);
+        }
+        invalidate();
+    }
+
     @Override
     protected void onDraw(Canvas c) {
         int w = getWidth(), h = getHeight();
@@ -151,6 +187,27 @@ public class ScanBubbleView extends View {
             pulse = (float) (0.5 + 0.5 * Math.sin(elapsed * 0.012));
         }
 
+        // обновить прогресс pop-анимации
+        if (popping) {
+            long elapsed = System.currentTimeMillis() - popStart;
+            popProgress = Math.min(1f, (float) elapsed / POP_MS);
+            if (popProgress >= 1f) {
+                popping = false;
+                if (onPopDone != null) {
+                    Runnable r = onPopDone;
+                    onPopDone = null;
+                    r.run();
+                }
+                return; // больше не рисуем
+            }
+        }
+
+        if (popping) {
+            drawPop(c, w, h);
+            invalidate();
+            return;
+        }
+
         if (state == State.DONE) {
             drawDone(c, w, h);
         } else {
@@ -160,11 +217,68 @@ public class ScanBubbleView extends View {
         // искры рисуем поверх в любом состоянии при зажатии
         if (pressing && pressProgress > 0) {
             drawSparks(c, w, h);
-            // прогресс-кольцо долгого зажатия
-            if (pressProgress < 1f) {
-                drawPressRing(c, w, h);
+            if (pressProgress < 1f) drawPressRing(c, w, h);
+            invalidate();
+        }
+    }
+
+    /** Лопающийся пузырь: расширение → ripple → burst-частицы → затухание. */
+    private void drawPop(Canvas c, int w, int h) {
+        float cx = w / 2f, cy = h / 2f;
+        float p = popProgress;
+
+        // 1) расширение (0..0.25) → сжатие с overshoot (0.25..0.5) → исчезновение
+        float scale;
+        if (p < 0.25f) {
+            scale = 1f + p * 0.8f;         // 1.0 → 1.2
+        } else if (p < 0.45f) {
+            float t = (p - 0.25f) / 0.2f;  // 0..1
+            scale = 1.2f - t * 1.2f;       // 1.2 → 0
+        } else {
+            scale = 0;
+        }
+        int alpha = (int) (255 * (1f - p * p));
+
+        // 2) рисуем пузырь с scale и затуханием
+        if (scale > 0 && alpha > 0) {
+            c.save();
+            c.scale(scale, scale, cx, cy);
+            bg.setAlpha(alpha);
+            if (state == State.DONE) {
+                RectF box = new RectF(dp(1), dp(1), w - dp(1), h - dp(1));
+                c.drawRoundRect(box, h / 2f, h / 2f, bg);
+            } else {
+                float r = Math.min(w, h) / 2f - dp(3);
+                c.drawCircle(cx, cy, r, bg);
             }
-            invalidate(); // продолжить анимацию
+            bg.setAlpha(255);
+            c.restore();
+        }
+
+        // 3) ripple — расходящееся кольцо
+        if (p < 0.6f) {
+            float rippleR = Math.max(w, h) / 2f * (0.5f + p * 1.5f);
+            float rippleA = (1f - p / 0.6f) * 0.4f;
+            Paint rp = new Paint(Paint.ANTI_ALIAS_FLAG);
+            rp.setStyle(Paint.Style.STROKE);
+            rp.setStrokeWidth(dp(2));
+            rp.setColor(0xCCFFFFFF);
+            rp.setAlpha((int) (255 * rippleA));
+            c.drawCircle(cx, cy, rippleR, rp);
+        }
+
+        // 4) burst-частицы разлетаются наружу
+        for (BurstParticle bp : burst) {
+            float t = p;
+            bp.dist = dp(30 + t * 80);
+            float x = cx + (float) Math.cos(bp.angle) * bp.dist;
+            float y = cy + (float) Math.sin(bp.angle) * bp.dist;
+            float sz = bp.size * (1f - t * 0.6f);
+            int a = (int) (Color.alpha(bp.color) * (1f - t));
+            if (a <= 0 || sz <= 0) continue;
+            sparkPaint.setColor(bp.color);
+            sparkPaint.setAlpha(a);
+            c.drawCircle(x, y, sz, sparkPaint);
         }
     }
 
