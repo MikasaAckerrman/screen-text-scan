@@ -153,8 +153,20 @@ public class ScanAccessibilityService extends AccessibilityService {
              */
             boolean virtual = cx < 0 || cy < 0 || cx > screenW || cy > screenH;
 
-            boolean keep = virtual || zone == null || zone.contains(cx, cy);
-            if (keep) out.add(new Line(text, norm, virtual));
+            /*
+             * БЫЛ БАГ ФАНТОМНОГО ТЕКСТА: приложение читало текст из узлов,
+             * которых не видно на экране — скрытые View (visibility=GONE),
+             * off-screen контент, системные элементы. isVisibleToUser()
+             * отсекает их. Виртуальные (WebView) узлы проверяем отдельно:
+             * WebView не всегда корректно сообщает видимость, а текст там
+             * настоящий.
+             */
+            boolean visible = virtual || node.isVisibleToUser();
+
+            if (visible) {
+                boolean keep = virtual || zone == null || zone.contains(cx, cy);
+                if (keep) out.add(new Line(text, norm, virtual));
+            }
         }
 
         int n = node.getChildCount();

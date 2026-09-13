@@ -79,7 +79,7 @@ public final class Permissions {
          * отсутствие настройки не считать запретом.
          */
         return Settings.Secure.getInt(c.getContentResolver(),
-                Settings.Secure.ACCESSIBILITY_ENABLED, 1) == 1;
+                Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1;
     }
 
     /** Всё ли готово к чтению. */

@@ -40,9 +40,17 @@ public class LaunchActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
 
+        boolean canOverlay = Permissions.canOverlay(this);
+        boolean a11yMaster = Permissions.isAccessibilityMasterOn(this);
+        boolean a11y = Permissions.isAccessibilityEnabled(this);
+        boolean ready = canOverlay && a11yMaster && a11y;
+        android.util.Log.d("ScreenTextScan",
+                "launch: ready=" + ready + " overlay=" + canOverlay
+                        + " master=" + a11yMaster + " a11y=" + a11y);
+
         // Разрешений нет — ведём в настройку. Проверка по системной настройке,
         // а не по живому экземпляру службы: см. Permissions.
-        if (!Permissions.ready(this)) {
+        if (!ready) {
             startActivity(new Intent(this, MainActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             finish();

@@ -51,17 +51,19 @@ public class ScanTileService extends TileService {
     public void onClick() {
         super.onClick();
 
+        boolean canOverlay = Permissions.canOverlay(this);
+        boolean a11yMaster = Permissions.isAccessibilityMasterOn(this);
+        boolean a11y = Permissions.isAccessibilityEnabled(this);
+        boolean ready = canOverlay && a11yMaster && a11y;
+
+        android.util.Log.d("ScreenTextScan",
+                "tile: ready=" + ready + " overlay=" + canOverlay
+                        + " master=" + a11yMaster + " a11y=" + a11y);
+
         /*
-         * Куда ведём. Если чего-то не хватает — на экран настройки, он
-         * показывает, что именно. Если всё есть — в невидимый переходник,
-         * который поднимает сервис.
-         *
-         * ПОЧЕМУ НЕ СЕРВИС НАПРЯМУЮ: панель быстрых настроек закрывается
-         * только как побочный эффект запуска АКТИВНОСТИ. Пока панель
-         * открыта, активное окно — это она, и служба доступности прочитает
-         * саму панель вместо приложения под ней.
+         * Куда ведём. Если разрешения есть — сразу overlay. Если нет —
+         * MainActivity показывает статус (без авто-редиректа в настройки).
          */
-        boolean ready = Permissions.ready(this);
         Intent target = ready
                 ? new Intent(this, LaunchActivity.class)
                 : new Intent(this, MainActivity.class);

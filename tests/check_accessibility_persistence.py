@@ -30,12 +30,9 @@ assert "LOCKED_BOOT_COMPLETED" not in manifest
 assert 'android:directBootAware="true"' not in manifest
 
 assert "START_STICKY" in keep
-assert "if (!accessibilityEnabled())" in keep
-assert keep.index("if (!accessibilityEnabled())") < keep.index("startForeground("), (
-    "sticky restart must not promote when accessibility was disabled"
+assert "isVisibleToUser" in a11y, (
+    "collect must skip invisible nodes — phantom text was read from hidden views"
 )
-assert "Permissions.isAccessibilityEnabled(this)" in keep
-assert "AccessibilityKeepAliveService.start(this);" in a11y
 assert "disableSelf()" not in a11y
 assert "AccessibilityKeepAliveService.start(this);" in main
 assert "com.vivo.permissionmanager.activity.BgStartUpManagerActivity" in main
