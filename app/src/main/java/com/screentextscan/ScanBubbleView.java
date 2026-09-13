@@ -308,7 +308,6 @@ public class ScanBubbleView extends View {
             drawTick(c, cx, cy, r * 0.42f);
         } else {
             num.setTextSize(sp(count >= 100 ? 15 : 18));
-            num.getTextBounds("0", 0, 1, tmpRect);
             float textH = num.ascent() + num.descent();
             c.drawText(String.valueOf(count), cx, cy - textH / 2, num);
         }
