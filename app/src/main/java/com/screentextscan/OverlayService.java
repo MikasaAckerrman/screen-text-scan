@@ -127,7 +127,11 @@ public class OverlayService extends Service {
             stopEverything();
             return START_NOT_STICKY;
         }
-        if (ScanAccessibilityService.get() == null) {
+        // Проверяем СИСТЕМНУЮ НАСТРОЙКУ, а не живой экземпляр службы:
+        // после полного выхода процесс убит, и служба привязывается не
+        // мгновенно. poll ниже подхватит её, как только система подключит.
+        if (!Permissions.isAccessibilityEnabled(this)
+                || !Permissions.isAccessibilityMasterOn(this)) {
             Toast.makeText(this, "Сначала включите службу «Чтение с экрана» в настройках доступности",
                     Toast.LENGTH_LONG).show();
             stopEverything();

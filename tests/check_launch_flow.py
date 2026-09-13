@@ -38,12 +38,14 @@ assert "new Intent(this, LaunchActivity.class)" in main, (
 assert "return canOverlay(c) && isAccessibilityMasterOn(c)" in permissions, (
     "ready() must reject a disabled accessibility master switch"
 )
-assert "WAIT_TOTAL_MS" in launch and "WAIT_STEP_MS" in launch
-assert "h.postDelayed(this::waitForServiceThenStart, WAIT_STEP_MS)" in launch, (
-    "LaunchActivity must retry while the enabled accessibility service binds"
+assert "WAIT_TOTAL_MS" not in launch, (
+    "LaunchActivity must not wait for service — it caused 'Служба чтения не запустилась' "
+    "after force-stop because cold start takes longer than the timeout"
 )
-assert "moveTaskToBack(true);" in launch, (
+assert "startForegroundService" in launch
+assert "moveTaskToBack" in launch, (
     "LaunchActivity must reveal the app below before showing the overlay"
 )
+assert "OverlayService.ACTION_START" in launch
 
 print("scan launch flow: OK")
