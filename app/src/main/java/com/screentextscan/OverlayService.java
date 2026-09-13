@@ -417,7 +417,7 @@ public class OverlayService extends Service {
                         // Всегда запускаем таймер 2.5с → убрать шарик
                         bubble.startLongPressAnim();
                         longPressCallback = () -> {
-                            if (!moved && bubble != null && scanning) {
+                            if (bubble != null && scanning) {
                                 longPressHandled = true;
                                 bubble.cancelLongPressAnim();
                                 vibrate(true);
@@ -429,10 +429,10 @@ public class OverlayService extends Service {
                     case MotionEvent.ACTION_MOVE: {
                         int dx = (int) (e.getRawX() - startX);
                         int dy = (int) (e.getRawY() - startY);
-                        if (Math.abs(dx) > slop || Math.abs(dy) > slop) {
-                            moved = true;
-                            bubble.cancelLongPressAnim();
-                        }
+                        if (Math.abs(dx) > slop || Math.abs(dy) > slop) moved = true;
+                        // Перетаскивание НЕ отменяет таймер зажатия —
+                        // пользователь может двигать шарик и одновременно
+                        // держать для удаления.
                         bubbleParams.x = ZoneGeometry.clamp(origX + dx, 0,
                                 Math.max(0, screenW - bubble.getWidth()));
                         bubbleParams.y = ZoneGeometry.clamp(origY + dy, 0,

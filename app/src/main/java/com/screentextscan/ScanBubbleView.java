@@ -3,6 +3,7 @@ package com.screentextscan;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RadialGradient;
@@ -16,67 +17,66 @@ import java.util.List;
 import java.util.Random;
 
 /**
- * Плавающий круг с «вкусной» тёмной текстурой.
+ * Премиум плавающий круг: тёмная текстура, сине-фиолетовые эффекты,
+ * полоски-стримеры вместо точек.
  *
- * View = 200dp (чтобы искры и burst помещались полностью).
- * Рисуемый круг = 62dp — по центру View.
+ * View = 200dp, круг = 62dp по центру.
  *
- * ВЗАИМОДЕЙСТВИЕ (из OverlayService):
- *   тап        → копировать накопленный текст + flash + продолжить чтение
- *   зажатие 2.5с → искры → pop → убрать с экрана
- *
- * АНИМАЦИИ:
- *   pulseNewText() — всасывание частиц при новом тексте
- *   startLongPressAnim() — искры сходятся к центру при зажатии
- *   flashCopy() — вспышка-волна при копировании
- *   pop() — лопающийся пузырь
- *   press — лёгкое сжатие при нажатии (0.95) + glow
+ *   тап        → копировать + flash + продолжить
+ *   зажатие 2.5с → искры-стримеры → pop → убрать
  */
 public class ScanBubbleView extends View {
 
-    // --- палитра ---
-    private static final int CIRCLE_BG = 0xF0101014;
+    // --- палитра: сине-фиолетовый премиум ---
     private static final int FG        = 0xFFFFFFFF;
     private static final int RING_DIM  = 0x22FFFFFF;
     private static final int RING_FG   = 0xFFFFFFFF;
 
+    // спектр от глубокого синего до фиолетового — НЕ мультяшно
     private static final int[] SPARK_COLORS = {
-        0xCCFFFFFF, 0xAA88CCFF, 0xAA88AACC, 0xAAAACCFF, 0xCCDDFFFF
+        0xCC4466FF,  // яркий синий
+        0xCC5544CC,  // фиолетовый
+        0xCC6633DD,  // глубокий фиолетовый
+        0xCC7755EE,  // светло-фиолетовый
+        0xCC3377FF,  // электрик-синий
+        0xCC8844FF,  // пурпур
+        0xCC4488EE,  // индиго
+        0xCC5577DD,  // приглушённый сине-фиолетовый
     };
 
-    // радиус рисуемого круга (View больше — для анимаций)
-    private static final float CIRCLE_DP = 31f; // 62dp diameter
+    private static final float CIRCLE_DP = 31f;
 
-    private final Paint bg        = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ringBg    = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ring      = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint num       = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint tick      = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint sparkPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint tmpPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final RectF tmpRect   = new RectF();
-    private final Path  tmpPath   = new Path();
+    // paints
+    private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ringBg = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint num = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint streakPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint tmpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF tmpRect = new RectF();
+    private final Path tmpPath = new Path();
     private RadialGradient texture;
 
     private int count;
     private float readiness;
     private boolean complete;
 
-    // --- press ---
+    // press
     private float pressScale = 1.0f;
     private float glowAlpha = 0f;
 
-    // --- всасывание ---
-    private static final long ABSORB_MS = 700;
-    private static final int ABSORB_COUNT = 14;
+    // всасывание — полоски-стримеры
+    private static final long ABSORB_MS = 800;
+    private static final int ABSORB_COUNT = 16;
     private boolean absorbing = false;
     private long absorbStart;
     private final List<float[]> absorbParticles = new ArrayList<>();
     private final Random rnd = new Random();
 
-    // --- искры при зажатии ---
-    private static final int SPARK_COUNT = 32;
+    // искры зажатия
+    private static final int SPARK_COUNT = 36;
     private static final long LONG_PRESS_MS = 2500;
     private final List<float[]> sparks = new ArrayList<>();
     private long pressStart;
@@ -84,12 +84,12 @@ public class ScanBubbleView extends View {
     private float pressProgress;
     private float pulse;
 
-    // --- flash при копировании ---
-    private static final long FLASH_MS = 600;
+    // flash
+    private static final long FLASH_MS = 650;
     private boolean flashing = false;
     private long flashStart;
 
-    // --- pop ---
+    // pop
     private static final long POP_MS = 500;
     private boolean popping = false;
     private long popStart;
@@ -114,8 +114,9 @@ public class ScanBubbleView extends View {
         tick.setColor(FG);
         tick.setStrokeWidth(dp(2));
         tick.setStrokeCap(Paint.Cap.ROUND);
-        sparkPaint.setStyle(Paint.Style.FILL);
-        glowPaint.setStyle(Paint.Style.FILL);
+        streakPaint.setStyle(Paint.Style.STROKE);
+        streakPaint.setStrokeCap(Paint.Cap.ROUND);
+        dotPaint.setStyle(Paint.Style.FILL);
     }
 
     public void setCount(int c) { count = c; invalidate(); }
@@ -126,39 +127,26 @@ public class ScanBubbleView extends View {
     }
 
     // === PRESS ===
-
-    /** Вызывается из OverlayService при ACTION_DOWN. */
-    public void onPress() {
-        pressScale = 0.93f;
-        glowAlpha = 1.0f;
-        invalidate();
-    }
-
-    /** Вызывается из OverlayService при ACTION_UP/CANCEL. */
-    public void onRelease() {
-        pressScale = 1.0f;
-        glowAlpha = 0f;
-        invalidate();
-    }
+    public void onPress() { pressScale = 0.93f; glowAlpha = 1.0f; invalidate(); }
+    public void onRelease() { pressScale = 1.0f; glowAlpha = 0f; invalidate(); }
 
     // === ВСАСЫВАНИЕ ===
-
     public void pulseNewText() {
         absorbing = true;
         absorbStart = System.currentTimeMillis();
         absorbParticles.clear();
         for (int i = 0; i < ABSORB_COUNT; i++) {
-            float angle = (float) (i * (2 * Math.PI / ABSORB_COUNT)) + rnd.nextFloat() * 0.5f;
-            float dist = dp(70 + rnd.nextInt(50));
-            float size = dp(1.5f + rnd.nextFloat() * 2.5f);
+            float angle = (float) (i * (2 * Math.PI / ABSORB_COUNT)) + rnd.nextFloat() * 0.4f;
+            float dist = dp(75 + rnd.nextInt(45));
+            float len = dp(12 + rnd.nextInt(20));
+            float width = dp(1 + rnd.nextFloat() * 1.5f);
             int color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
-            absorbParticles.add(new float[]{angle, dist, size, color});
+            absorbParticles.add(new float[]{angle, dist, len, width, color});
         }
         invalidate();
     }
 
     // === ИСКРЫ ЗАЖАТИЯ ===
-
     public void startLongPressAnim() {
         pressing = true;
         pressStart = System.currentTimeMillis();
@@ -166,10 +154,11 @@ public class ScanBubbleView extends View {
         sparks.clear();
         for (int i = 0; i < SPARK_COUNT; i++) {
             float angle = (float) (i * (2 * Math.PI / SPARK_COUNT)) + rnd.nextFloat() * 0.3f;
-            float dist = dp(80 + rnd.nextInt(60));
-            float size = dp(1.5f + rnd.nextFloat() * 2.5f);
+            float dist = dp(85 + rnd.nextInt(55));
+            float len = dp(10 + rnd.nextInt(25));
+            float width = dp(1 + rnd.nextFloat() * 1.5f);
             int color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
-            sparks.add(new float[]{angle, dist, size, color});
+            sparks.add(new float[]{angle, dist, len, width, color});
         }
         invalidate();
     }
@@ -181,35 +170,28 @@ public class ScanBubbleView extends View {
         invalidate();
     }
 
-    // === FLASH КОПИРОВАНИЯ ===
-
-    /** Краткая волна-вспышка при копировании — bubble остаётся. */
-    public void flashCopy() {
-        flashing = true;
-        flashStart = System.currentTimeMillis();
-        invalidate();
-    }
+    // === FLASH ===
+    public void flashCopy() { flashing = true; flashStart = System.currentTimeMillis(); invalidate(); }
 
     // === POP ===
-
     public void pop(Runnable done) {
         onPopDone = done;
         popping = true;
         popStart = System.currentTimeMillis();
         popProgress = 0;
         burst.clear();
-        for (int i = 0; i < 24; i++) {
-            float angle = (float) (i * (2 * Math.PI / 24)) + rnd.nextFloat() * 0.35f;
-            float size = dp(2 + rnd.nextFloat() * 4);
+        for (int i = 0; i < 28; i++) {
+            float angle = (float) (i * (2 * Math.PI / 28)) + rnd.nextFloat() * 0.3f;
+            float len = dp(15 + rnd.nextInt(20));
+            float width = dp(1.5f + rnd.nextFloat() * 2f);
             float speed = 0.8f + rnd.nextFloat() * 0.6f;
             int color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
-            burst.add(new float[]{angle, 0, size, color, speed});
+            burst.add(new float[]{angle, 0, len, width, color, speed});
         }
         invalidate();
     }
 
     // === ONDRAW ===
-
     @Override
     protected void onDraw(Canvas c) {
         int w = getWidth(), h = getHeight();
@@ -218,7 +200,6 @@ public class ScanBubbleView extends View {
         float r = dp(CIRCLE_DP) * pressScale;
         boolean needInvalidate = false;
 
-        // POP имеет приоритет
         if (popping) {
             long elapsed = System.currentTimeMillis() - popStart;
             popProgress = Math.min(1f, (float) elapsed / POP_MS);
@@ -228,25 +209,21 @@ public class ScanBubbleView extends View {
                 final Runnable cb = onPopDone;
                 onPopDone = null;
                 if (cb != null) post(cb);
-            } else {
-                invalidate();
-            }
+            } else invalidate();
             return;
         }
 
-        // glow при нажатии
+        // glow
         if (glowAlpha > 0.01f) {
-            tmpPaint.set(glowPaint);
-            tmpPaint.setColor(0x4488CCFF);
-            tmpPaint.setAlpha((int) (80 * glowAlpha));
-            c.drawCircle(cx, cy, r + dp(8), tmpPaint);
+            tmpPaint.setColor(0x446688FF);
+            tmpPaint.setAlpha((int) (90 * glowAlpha));
+            c.drawCircle(cx, cy, r + dp(10), tmpPaint);
             needInvalidate = true;
-            glowAlpha *= 0.92f; // затухание
+            glowAlpha *= 0.93f;
         }
 
         drawCircle(c, cx, cy, r);
 
-        // flash при копировании
         if (flashing) {
             long elapsed = System.currentTimeMillis() - flashStart;
             float fp = Math.min(1f, (float) elapsed / FLASH_MS);
@@ -255,7 +232,6 @@ public class ScanBubbleView extends View {
             needInvalidate = true;
         }
 
-        // искры при зажатии
         if (pressing) {
             long elapsed = System.currentTimeMillis() - pressStart;
             pressProgress = Math.min(1f, (float) elapsed / LONG_PRESS_MS);
@@ -265,7 +241,6 @@ public class ScanBubbleView extends View {
             needInvalidate = true;
         }
 
-        // всасывание
         if (absorbing) {
             long elapsed = System.currentTimeMillis() - absorbStart;
             float ap = Math.min(1f, (float) elapsed / ABSORB_MS);
@@ -277,13 +252,12 @@ public class ScanBubbleView extends View {
         if (needInvalidate) invalidate();
     }
 
-    /** «Вкусная» тёмная текстура: radial gradient с голубым бликом. */
+    /** «Вкусная» тёмная текстура: radial gradient с сине-фиолетовым бликом. */
     private void drawCircle(Canvas c, float cx, float cy, float r) {
         if (texture == null) {
-            // лёгкий голубой блик сверху-слева, как капсула порошка
             texture = new RadialGradient(
                 -r * 0.3f, -r * 0.4f, r * 2.2f,
-                new int[]{0xFF1C2A38, 0xF0141820, 0xF0080A10},
+                new int[]{0xFF1A1830, 0xF0121420, 0xF0080810},
                 new float[]{0f, 0.4f, 1f},
                 Shader.TileMode.CLAMP);
         }
@@ -291,19 +265,16 @@ public class ScanBubbleView extends View {
         c.drawCircle(cx, cy, r, bg);
         bg.setShader(null);
 
-        // тонкая внутренняя обводка для глубины
+        // внутренняя обводка
         tmpPaint.set(ringBg);
-        tmpPaint.setColor(0x18FFFFFF);
+        tmpPaint.setColor(0x15FFFFFF);
         c.drawCircle(cx, cy, r - dp(1), tmpPaint);
 
         // кольцо готовности
         tmpRect.set(cx - r + dp(2), cy - r + dp(2), cx + r - dp(2), cy + r - dp(2));
         c.drawArc(tmpRect, 0, 360, false, ringBg);
-        if (readiness > 0) {
-            c.drawArc(tmpRect, -90, 360 * readiness, false, ring);
-        }
+        if (readiness > 0) c.drawArc(tmpRect, -90, 360 * readiness, false, ring);
 
-        // цифра или галочка — ровно по центру через ascent/descent
         if (complete) {
             drawTick(c, cx, cy, r * 0.42f);
         } else {
@@ -313,51 +284,65 @@ public class ScanBubbleView extends View {
         }
     }
 
-    /** Вспышка-волна при копировании: расходящееся кольцо + частицы. */
-    private void drawFlash(Canvas c, float cx, float cy, float r, float p) {
-        // кольцо
-        float fr = r * (1f + p * 1.5f);
-        float fa = (1f - p) * 0.7f;
-        tmpPaint.setStyle(Paint.Style.STROKE);
-        tmpPaint.setStrokeWidth(dp(2.5f * (1f - p)));
-        tmpPaint.setColor(0xDDFFFFFF);
-        tmpPaint.setAlpha((int) (255 * fa));
-        c.drawCircle(cx, cy, fr, tmpPaint);
+    /** Всасывание: полоски-стримеры тянутся к центру. */
+    private void drawAbsorb(Canvas c, float cx, float cy, float r, float p) {
+        for (float[] ap : absorbParticles) {
+            float angle = ap[0], startDist = ap[1], len = ap[2], width = ap[3];
+            int color = (int) ap[4];
+            // позиция головы стримера
+            float dist = startDist * (1f - p) + r * 0.2f * (1f - p);
+            float appear = Math.min(1f, p * 2.5f);
+            if (appear <= 0) continue;
+            float fade = (1f - p * 0.9f) * appear;
+            int alpha = (int) (Color.alpha(color) * fade);
+            if (alpha <= 0) continue;
 
-        // лёгкие частицы наружу
-        for (int i = 0; i < 8; i++) {
-            float a = (float) (i * Math.PI / 4);
-            float d = r + p * r * 1.2f;
-            float x = cx + (float) Math.cos(a) * d;
-            float y = cy + (float) Math.sin(a) * d;
-            float sz = dp(2) * (1f - p);
-            if (sz <= 0) continue;
-            sparkPaint.setColor(0xCCFFFFFF);
-            sparkPaint.setAlpha((int) (200 * (1f - p)));
-            c.drawCircle(x, y, sz, sparkPaint);
+            float headX = cx + (float) Math.cos(angle) * dist;
+            float headY = cy + (float) Math.sin(angle) * dist;
+            // хвост стримера — дальше от центра
+            float tailDist = dist + len * (1f - p * 0.5f);
+            float tailX = cx + (float) Math.cos(angle) * tailDist;
+            float tailY = cy + (float) Math.sin(angle) * tailDist;
+
+            // градиентная полоска: голова яркая, хвост затухает
+            streakPaint.setStrokeWidth(width * (0.5f + 0.5f * (1f - p)));
+            streakPaint.setColor(color);
+            streakPaint.setAlpha(alpha);
+            c.drawLine(headX, headY, tailX, tailY, streakPaint);
+
+            // яркая точка на голове
+            dotPaint.setColor(color);
+            dotPaint.setAlpha(alpha);
+            c.drawCircle(headX, headY, width * 0.8f, dotPaint);
         }
     }
 
+    /** Искры зажатия: сине-фиолетовые стримеры сходятся к центру. */
     private void drawSparks(Canvas c, float cx, float cy) {
         for (float[] s : sparks) {
-            float angle = s[0], startDist = s[1], size = s[2];
-            int color = (int) s[3];
+            float angle = s[0], startDist = s[1], len = s[2], width = s[3];
+            int color = (int) s[4];
             float dist = startDist * (1f - pressProgress);
-            float appear = Math.min(1f, pressProgress * 1.5f + angle * 0.05f);
+            float appear = Math.min(1f, pressProgress * 1.5f + angle * 0.04f);
             if (appear <= 0) continue;
-            float x = cx + (float) Math.cos(angle) * dist;
-            float y = cy + (float) Math.sin(angle) * dist;
-            float sz = size * appear * (1f - pressProgress * 0.5f);
-            sparkPaint.setColor(color);
-            sparkPaint.setAlpha((int) (Color.alpha(color) * appear * (1f - pressProgress * 0.3f)));
-            c.drawCircle(x, y, sz, sparkPaint);
-            if (pressProgress > 0.2f) {
-                float trail = dist + dp(8);
-                sparkPaint.setAlpha((int) (40 * appear * (1f - pressProgress)));
-                c.drawCircle(cx + (float) Math.cos(angle) * trail,
-                              cy + (float) Math.sin(angle) * trail,
-                              sz * 0.4f, sparkPaint);
-            }
+
+            float headX = cx + (float) Math.cos(angle) * dist;
+            float headY = cy + (float) Math.sin(angle) * dist;
+            float tailDist = dist + len * (1f - pressProgress * 0.5f);
+            float tailX = cx + (float) Math.cos(angle) * tailDist;
+            float tailY = cy + (float) Math.sin(angle) * tailDist;
+
+            int alpha = (int) (Color.alpha(color) * appear * (1f - pressProgress * 0.3f));
+            streakPaint.setStrokeWidth(width * appear);
+            streakPaint.setColor(color);
+            streakPaint.setAlpha(alpha);
+            c.drawLine(headX, headY, tailX, tailY, streakPaint);
+
+            // голова-точка
+            dotPaint.setColor(color);
+            dotPaint.setAlpha(alpha);
+            float sz = width * appear * (1f - pressProgress * 0.5f);
+            c.drawCircle(headX, headY, sz, dotPaint);
         }
     }
 
@@ -366,40 +351,43 @@ public class ScanBubbleView extends View {
         tmpRect.set(cx - rr, cy - rr, cx + rr, cy + rr);
         tmpPaint.set(ring);
         tmpPaint.setStrokeWidth(dp(2.5f + pulse));
-        tmpPaint.setColor(0x66AACCFF);
+        tmpPaint.setColor(0x665577FF);
         c.drawArc(tmpRect, -90, 360 * pressProgress, false, tmpPaint);
     }
 
-    private void drawAbsorb(Canvas c, float cx, float cy, float r, float p) {
-        for (float[] ap : absorbParticles) {
-            float angle = ap[0], startDist = ap[1], size = ap[2];
-            int color = (int) ap[3];
-            float dist = startDist * (1f - p) + r * 0.3f * (1f - p);
-            float appear = Math.min(1f, p * 2f);
-            if (appear <= 0) continue;
-            float fade = (1f - p) * appear;
-            int alpha = (int) (Color.alpha(color) * fade);
-            if (alpha <= 0) continue;
-            float x = cx + (float) Math.cos(angle) * dist;
-            float y = cy + (float) Math.sin(angle) * dist;
-            float sz = size * appear * (0.5f + 0.5f * (1f - p));
-            sparkPaint.setColor(color);
-            sparkPaint.setAlpha(alpha);
-            c.drawCircle(x, y, sz, sparkPaint);
-            float trailDist = dist + dp(6);
-            sparkPaint.setAlpha((int) (30 * fade));
-            c.drawCircle(cx + (float) Math.cos(angle) * trailDist,
-                          cy + (float) Math.sin(angle) * trailDist,
-                          sz * 0.3f, sparkPaint);
+    /** Flash копирования: кольцо + стримеры. */
+    private void drawFlash(Canvas c, float cx, float cy, float r, float p) {
+        // кольцо
+        float fr = r * (1f + p * 1.5f);
+        float fa = (1f - p) * 0.7f;
+        tmpPaint.setStyle(Paint.Style.STROKE);
+        tmpPaint.setStrokeWidth(dp(2.5f * (1f - p)));
+        tmpPaint.setColor(0xDD6688FF);
+        tmpPaint.setAlpha((int) (255 * fa));
+        c.drawCircle(cx, cy, fr, tmpPaint);
+
+        // стримеры наружу
+        for (int i = 0; i < 10; i++) {
+            float a = (float) (i * 2 * Math.PI / 10);
+            float d1 = r + p * r * 0.8f;
+            float d2 = r + p * r * 1.4f;
+            float x1 = cx + (float) Math.cos(a) * d1;
+            float y1 = cy + (float) Math.sin(a) * d1;
+            float x2 = cx + (float) Math.cos(a) * d2;
+            float y2 = cy + (float) Math.sin(a) * d2;
+            int color = SPARK_COLORS[i % SPARK_COLORS.length];
+            streakPaint.setStrokeWidth(dp(2) * (1f - p));
+            streakPaint.setColor(color);
+            streakPaint.setAlpha((int) (200 * (1f - p)));
+            c.drawLine(x1, y1, x2, y2, streakPaint);
         }
     }
 
+    /** Pop: расширение → 2 ripple → стримеры наружу → вспышка. */
     private void drawPop(Canvas c, int w, int h, float cx, float cy, float r) {
         float p = popProgress;
-        float scale;
-        if (p < 0.2f) scale = 1f + p * 1.0f;
-        else if (p < 0.45f) scale = 1.2f - ((p - 0.2f) / 0.25f) * 1.2f;
-        else scale = 0;
+        float scale = p < 0.2f ? 1f + p
+                : p < 0.45f ? 1.2f - ((p - 0.2f) / 0.25f) * 1.2f : 0;
         int alpha = (int) (255 * (1f - p * p));
 
         if (scale > 0 && alpha > 0) {
@@ -422,40 +410,40 @@ public class ScanBubbleView extends View {
             if (ra <= 0) continue;
             tmpPaint.setStyle(Paint.Style.STROKE);
             tmpPaint.setStrokeWidth(dp(2 - i * 0.5f));
-            tmpPaint.setColor(0xDDFFFFFF);
+            tmpPaint.setColor(0xDD6688FF);
             tmpPaint.setAlpha((int) (255 * ra));
             c.drawCircle(cx, cy, rr, tmpPaint);
         }
 
-        // burst-частицы
+        // стримеры наружу
         for (float[] bp : burst) {
-            float angle = bp[0], size = bp[2];
-            int color = (int) bp[3];
-            float speed = bp[4];
+            float angle = bp[0], len = bp[2], width = bp[3];
+            int color = (int) bp[4];
+            float speed = bp[5];
             float t = p * speed;
-            float dist = r * 0.5f + t * r * 2.5f;
-            float x = cx + (float) Math.cos(angle) * dist;
-            float y = cy + (float) Math.sin(angle) * dist;
-            float sz = size * (1f - t * 0.5f);
+            float dist = r * 0.4f + t * r * 2.5f;
+            float headX = cx + (float) Math.cos(angle) * dist;
+            float headY = cy + (float) Math.sin(angle) * dist;
+            float tailDist = dist + len * (1f - t * 0.5f);
+            float tailX = cx + (float) Math.cos(angle) * tailDist;
+            float tailY = cy + (float) Math.sin(angle) * tailDist;
             int a = (int) (Color.alpha(color) * Math.max(0, 1f - t));
-            if (a <= 0 || sz <= 0) continue;
-            sparkPaint.setColor(color);
-            sparkPaint.setAlpha(a);
-            c.drawCircle(x, y, sz, sparkPaint);
-            float td = dist - dp(10);
-            if (td > 0) {
-                sparkPaint.setAlpha((int) (a * 0.3f));
-                c.drawCircle(cx + (float) Math.cos(angle) * td,
-                              cy + (float) Math.sin(angle) * td,
-                              sz * 0.4f, sparkPaint);
-            }
+            if (a <= 0) continue;
+            streakPaint.setStrokeWidth(width * (1f - t * 0.5f));
+            streakPaint.setColor(color);
+            streakPaint.setAlpha(a);
+            c.drawLine(headX, headY, tailX, tailY, streakPaint);
+            // голова
+            dotPaint.setColor(color);
+            dotPaint.setAlpha(a);
+            c.drawCircle(headX, headY, width * (1f - t * 0.5f), dotPaint);
         }
 
         // центральная вспышка
         if (p < 0.35f) {
-            float fa = (1f - p / 0.35f) * 0.5f;
+            float fa = (1f - p / 0.35f) * 0.4f;
             tmpPaint.setStyle(Paint.Style.FILL);
-            tmpPaint.setColor(0xFFFFFFFF);
+            tmpPaint.setColor(0xCC7788FF);
             tmpPaint.setAlpha((int) (255 * fa));
             c.drawCircle(cx, cy, r * (0.3f + p * 0.4f), tmpPaint);
         }
