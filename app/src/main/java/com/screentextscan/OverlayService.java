@@ -275,9 +275,11 @@ public class OverlayService extends Service {
         scanning = true;
         finished = false;
         lastNewAt = System.currentTimeMillis();
-        // Запоминаем, какое приложение читаем. При смене окна — стоп.
-        ScanAccessibilityService svc = ScanAccessibilityService.get();
-        scanningPackage = svc == null ? null : svc.getActiveWindowPackage();
+        // scanningPackage устанавливается на первом poll, где виден реальный
+        // пакет (не наш overlay). Если установить здесь, getActiveWindowPackage
+        // вернёт com.screentextscan (наш overlay ещё активен) → при смене на
+        // целевое приложение poll решит «пакет сменился» → стоп.
+        scanningPackage = null;
         showBubble();
         updateNotification("Читаю. Листайте текст.");
         ui.postDelayed(poll, POLL_MS);
@@ -289,14 +291,26 @@ public class OverlayService extends Service {
             if (!scanning) return;
             ScanAccessibilityService svc = ScanAccessibilityService.get();
             if (svc != null) {
-                // Остановить скан, если пользователь покинул приложение —
-                // иначе poll прочитает домашний экран со всеми иконками.
                 String currentPkg = svc.getActiveWindowPackage();
-                if (scanningPackage != null && currentPkg != null
-                        && !scanningPackage.equals(currentPkg)
-                        && !"com.screentextscan".equals(currentPkg)) {
+
+                if (currentPkg == null) {
+                    // Служба ещё не подключилась — ждём, не останавливаем.
+                } else if ("com.screentextscan".equals(currentPkg)) {
+                    // Наш overlay — не считаем сменой окна.
+                } else if (isLauncherPackage(currentPkg)) {
+                    // Пользователь вышел на главный экран — стоп.
+                    // Не читаем иконки приложений и виджеты.
                     finishScanning();
                     return;
+                } else {
+                    if (scanningPackage == null) {
+                        // Первый реальный пакет — начинаем отслеживание.
+                        scanningPackage = currentPkg;
+                    } else if (!scanningPackage.equals(currentPkg)) {
+                        // Пакет сменился — пользователь переключил приложение.
+                        finishScanning();
+                        return;
+                    }
                 }
 
                 List<ScanAccessibilityService.Line> lines =
@@ -501,6 +515,17 @@ public class OverlayService extends Service {
         }
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
+    }
+
+    /** Проверить, является ли пакет домашним экраном (лаунчером). */
+    private boolean isLauncherPackage(String pkg) {
+        if (pkg == null) return false;
+        Intent home = new Intent(Intent.ACTION_MAIN)
+                .addCategory(Intent.CATEGORY_HOME);
+        android.content.pm.ResolveInfo ri =
+                getPackageManager().resolveActivity(home, 0);
+        return ri != null && ri.activityInfo != null
+                && pkg.equals(ri.activityInfo.packageName);
     }
 
     @Override
