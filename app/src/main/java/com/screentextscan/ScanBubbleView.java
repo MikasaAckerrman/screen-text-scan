@@ -9,55 +9,70 @@ import android.graphics.RectF;
 import android.util.TypedValue;
 import android.view.View;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
 /**
- * Плавающая кнопка. Рисуется целиком вручную — три состояния в одном
- * элементе, и переходы между ними должны читаться без подписей.
+ * Минималистичный плавающий шарик с анимацией искр при долгом зажатии.
  *
- * ПОЧЕМУ ЧЁРНО-БЕЛАЯ. Кнопка висит над чужим приложением любого цвета.
- * Цветная (была красная) конфликтует с содержимым и выглядит как чужеродная
- * наклейка; чёрный круг с белой обводкой одинаково уместен и на светлом, и
- * на тёмном, а внимание притягивает формой, а не цветом.
+ * СОСТОЯНИЯ:
+ *   READING — маленький тёмный круг с числом строк и кольцом готовности.
+ *   DONE    — аккуратная пилюля с иконкой копирования.
  *
- * ЧТО ОЗНАЧАЮТ ЦИФРЫ — вопрос, который пришлось решать заново. Раньше в
- * круге стояло голое число, и понять, что это «строк набрано», было
- * невозможно. Теперь число сопровождается подписью «строк» мелким кеглем, а
- * главное — вокруг него идёт КОЛЬЦО ЗАПОЛНЕНИЯ:
+ * ВЗАИМОДЕЙСТВИЕ (управляется из OverlayService):
+ *   тап по DONE         → копировать в буфер, шарик исчезает
+ *   долгое зажатие 2.5с  → анимация искр → открыть экран правки
  *
- *   кольцо пустое   — только что появился новый текст, читаем дальше;
- *   кольцо растёт   — нового текста всё нет;
- *   кольцо полное + галочка — с этого экрана взято всё, можно листать
- *                             дальше или нажать и закончить.
- *
- * Это и есть ответ на «есть ли индикатор, что всё с экрана скопировалось»:
- * индикатор не может знать про текст, которого ещё не видел, но может
- * честно показать «на видимом участке новых строк больше не появляется».
+ * ИСКРЫ: при зажатии частицы сходятся со всех сторон к центру.
+ * Не огонь — мягкие белый/голубой/сиреневый. Сопровождаются лёгким
+ * пульсирующим кольцом прогресса.
  */
 public class ScanBubbleView extends View {
 
-    public enum State {
-        /** Читаем: круг, число, кольцо готовности. */
-        READING,
-        /** Остановлено: широкая кнопка «Копировать». */
-        DONE
-    }
+    public enum State { READING, DONE }
 
-    private static final int BG = 0xE6101014;        // почти чёрный, слегка прозрачный
-    private static final int FG = 0xFFFFFFFF;
-    private static final int RING_DIM = 0x33FFFFFF;
-    private static final int RING_FULL = 0xFFFFFFFF;
+    // --- палитра: тёмный минимализм + холодные искры ---
+    private static final int BG       = 0xF0101014;
+    private static final int FG       = 0xFFFFFFFF;
+    private static final int RING_DIM = 0x22FFFFFF;
+    private static final int RING_FG  = 0xFFFFFFFF;
+    private static final int SUBTLE   = 0x99FFFFFF;
 
-    private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
+    // цвета искр — не огонь, холодный спектр
+    private static final int[] SPARK_COLORS = {
+        0xCCFFFFFF, 0xAA88CCFF, 0xAA88AACC, 0xAAAACCFF, 0xCCDDFFFF
+    };
+
+    private final Paint bg     = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ringBg = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint num = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint cap = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ring   = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint num    = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint tick   = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint sparkPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private State state = State.READING;
     private int count;
-    /** 0..1 — насколько давно не было нового текста. */
     private float readiness;
     private boolean complete;
+
+    // --- анимация искр при долгом зажатии ---
+    private static final int SPARK_COUNT = 28;
+    private static final long LONG_PRESS_MS = 2500;
+    private final List<Spark> sparks = new ArrayList<>();
+    private final Random rnd = new Random();
+    private long pressStart;
+    private boolean pressing;
+    private float pressProgress; // 0..1 за 2.5с
+    private float pulse;          // лёгкая пульсация
+
+    private static class Spark {
+        float angle;    // направление от центра
+        float startDist; // начальная дистанция
+        float size;
+        int color;
+        float phase;     // 0..1 — насколько искра приблизилась
+    }
 
     public ScanBubbleView(Context c) {
         super(c);
@@ -66,44 +81,62 @@ public class ScanBubbleView extends View {
 
         ringBg.setStyle(Paint.Style.STROKE);
         ringBg.setColor(RING_DIM);
-        ringBg.setStrokeWidth(dp(2.5f));
+        ringBg.setStrokeWidth(dp(2));
 
         ring.setStyle(Paint.Style.STROKE);
-        ring.setColor(RING_FULL);
-        ring.setStrokeWidth(dp(2.5f));
+        ring.setColor(RING_FG);
+        ring.setStrokeWidth(dp(2.2f));
         ring.setStrokeCap(Paint.Cap.ROUND);
 
         num.setColor(FG);
         num.setTextAlign(Paint.Align.CENTER);
         num.setFakeBoldText(true);
 
-        cap.setColor(0xB3FFFFFF);
-        cap.setTextAlign(Paint.Align.CENTER);
-
         tick.setStyle(Paint.Style.STROKE);
         tick.setColor(FG);
-        tick.setStrokeWidth(dp(2.2f));
+        tick.setStrokeWidth(dp(2));
         tick.setStrokeCap(Paint.Cap.ROUND);
+
+        sparkPaint.setStyle(Paint.Style.FILL);
     }
 
-    public void setState(State s) {
-        state = s;
-        invalidate();
-    }
+    public void setState(State s) { state = s; invalidate(); }
+    public void setCount(int c) { count = c; invalidate(); }
 
-    public void setCount(int c) {
-        count = c;
-        invalidate();
-    }
-
-    /**
-     * @param r 0 — только что был новый текст, 1 — давно ничего нового
-     * @param done true, когда порог пройден: с видимого участка взято всё
-     */
     public void setReadiness(float r, boolean done) {
         readiness = r < 0 ? 0 : (r > 1 ? 1 : r);
         complete = done;
         invalidate();
+    }
+
+    /** Начать анимацию долгого зажатия. */
+    public void startLongPressAnim() {
+        pressing = true;
+        pressStart = System.currentTimeMillis();
+        pressProgress = 0;
+        sparks.clear();
+        for (int i = 0; i < SPARK_COUNT; i++) {
+            Spark s = new Spark();
+            s.angle = (float) (i * (2 * Math.PI / SPARK_COUNT)) + rnd.nextFloat() * 0.3f;
+            s.startDist = dp(80 + rnd.nextInt(60));
+            s.size = dp(1.5f + rnd.nextFloat() * 2.5f);
+            s.color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
+            s.phase = 0;
+            sparks.add(s);
+        }
+        invalidate();
+    }
+
+    /** Отменить анимацию (палец отпустили раньше или сдвинули). */
+    public void cancelLongPressAnim() {
+        pressing = false;
+        sparks.clear();
+        pressProgress = 0;
+        invalidate();
+    }
+
+    public boolean isLongPressReached() {
+        return pressing && System.currentTimeMillis() - pressStart >= LONG_PRESS_MS;
     }
 
     @Override
@@ -111,10 +144,27 @@ public class ScanBubbleView extends View {
         int w = getWidth(), h = getHeight();
         if (w == 0 || h == 0) return;
 
+        // обновить прогресс зажатия
+        if (pressing) {
+            long elapsed = System.currentTimeMillis() - pressStart;
+            pressProgress = Math.min(1f, (float) elapsed / LONG_PRESS_MS);
+            pulse = (float) (0.5 + 0.5 * Math.sin(elapsed * 0.012));
+        }
+
         if (state == State.DONE) {
             drawDone(c, w, h);
         } else {
             drawReading(c, w, h);
+        }
+
+        // искры рисуем поверх в любом состоянии при зажатии
+        if (pressing && pressProgress > 0) {
+            drawSparks(c, w, h);
+            // прогресс-кольцо долгого зажатия
+            if (pressProgress < 1f) {
+                drawPressRing(c, w, h);
+            }
+            invalidate(); // продолжить анимацию
         }
     }
 
@@ -124,44 +174,87 @@ public class ScanBubbleView extends View {
 
         c.drawCircle(cx, cy, r, bg);
 
-        // кольцо готовности: пустое → полное по мере отсутствия нового текста
-        RectF oval = new RectF(cx - r + dp(2), cy - r + dp(2), cx + r - dp(2), cy + r - dp(2));
+        RectF oval = new RectF(cx - r + dp(2), cy - r + dp(2),
+                               cx + r - dp(2), cy + r - dp(2));
         c.drawArc(oval, 0, 360, false, ringBg);
         if (readiness > 0) {
-            // от «12 часов» по часовой — привычное направление заполнения
             c.drawArc(oval, -90, 360 * readiness, false, ring);
         }
 
         if (complete) {
-            /*
-             * Полностью прочитанный участок показываем галочкой ВМЕСТО числа:
-             * когда всё взято, важно именно это, а счётчик уже не меняется и
-             * внимания не требует.
-             */
-            drawTick(c, cx, cy, r * 0.5f);
-            cap.setTextSize(sp(8.5f));
-            c.drawText("всё взято", cx, cy + r * 0.72f, cap);
+            drawTick(c, cx, cy, r * 0.45f);
         } else {
-            num.setTextSize(sp(count >= 1000 ? 14 : 17));
-            c.drawText(String.valueOf(count), cx, cy + dp(count >= 1000 ? 1.5f : 2f), num);
-            cap.setTextSize(sp(8.5f));
-            c.drawText(lineWord(count), cx, cy + r * 0.62f, cap);
+            num.setTextSize(sp(count >= 100 ? 15 : 18));
+            c.drawText(String.valueOf(count), cx, cy + dp(2), num);
         }
     }
 
-    /**
-     * Правильная форма слова: «1 строка», «2 строки», «5 строк».
-     * Мелочь, но «5 строка» в интерфейсе выглядит как недоделка.
-     */
-    private static String lineWord(int n) {
-        int t = n % 100;
-        if (t >= 11 && t <= 14) return "строк";
-        switch (n % 10) {
-            case 1: return "строка";
-            case 2:
-            case 3:
-            case 4: return "строки";
-            default: return "строк";
+    private void drawDone(Canvas c, int w, int h) {
+        // минималистичная пилюля со скруглением
+        RectF box = new RectF(dp(1), dp(1), w - dp(1), h - dp(1));
+        float rad = h / 2f;
+        c.drawRoundRect(box, rad, rad, bg);
+
+        // тонкая обводка
+        Paint stroke = new Paint(ringBg);
+        stroke.setColor(0x30FFFFFF);
+        c.drawRoundRect(box, rad, rad, stroke);
+
+        // иконка копирования — две накладывающиеся скруглённые рамки
+        float ix = h * 0.5f, iy = h / 2f, s = h * 0.22f;
+        Paint ic = new Paint(tick);
+        ic.setStrokeWidth(dp(1.6f));
+        ic.setStyle(Paint.Style.STROKE);
+        // задняя рамка
+        RectF back = new RectF(ix - s * 0.1f, iy - s * 0.8f, ix + s * 1.2f, iy + s * 0.5f);
+        c.drawRoundRect(back, dp(3), dp(3), ic);
+        // передняя рамка
+        RectF front = new RectF(ix - s * 0.8f, iy - s * 0.5f, ix + s * 0.5f, iy + s * 0.8f);
+        c.drawRoundRect(front, dp(3), dp(3), ic);
+
+        // число строк справа от иконки
+        num.setTextSize(sp(14));
+        num.setTextAlign(Paint.Align.LEFT);
+        c.drawText(String.valueOf(count), h * 0.85f, h / 2f + dp(5), num);
+        num.setTextAlign(Paint.Align.CENTER);
+    }
+
+    /** Кольцо прогресса долгого зажатия вокруг шарика. */
+    private void drawPressRing(Canvas c, int w, int h) {
+        float cx = w / 2f, cy = h / 2f;
+        float r = Math.max(w, h) / 2f + dp(6 + pulse * 3);
+        RectF oval = new RectF(cx - r, cy - r, cx + r, cy + r);
+        Paint p = new Paint(ring);
+        p.setStrokeWidth(dp(2.5f + pulse));
+        p.setColor(0x66AACCFF);
+        c.drawArc(oval, -90, 360 * pressProgress, false, p);
+    }
+
+    /** Идущие к центру искры. */
+    private void drawSparks(Canvas c, int w, int h) {
+        float cx = w / 2f, cy = h / 2f;
+        for (Spark s : sparks) {
+            // каждая искра движется от startDist к 0 (центру)
+            float dist = s.startDist * (1f - pressProgress);
+            // лёгкая волна — искры появляются не все сразу
+            float appear = Math.min(1f, pressProgress * 1.5f + s.angle * 0.05f);
+            if (appear <= 0) continue;
+            float x = cx + (float) Math.cos(s.angle) * dist;
+            float y = cy + (float) Math.sin(s.angle) * dist;
+            float sz = s.size * appear * (1f - pressProgress * 0.5f);
+
+            sparkPaint.setColor(s.color);
+            sparkPaint.setAlpha((int) (Color.alpha(s.color) * appear * (1f - pressProgress * 0.3f)));
+            c.drawCircle(x, y, sz, sparkPaint);
+
+            // лёгкий след
+            if (pressProgress > 0.2f) {
+                float trail = dist + dp(8);
+                float tx = cx + (float) Math.cos(s.angle) * trail;
+                float ty = cy + (float) Math.sin(s.angle) * trail;
+                sparkPaint.setAlpha((int) (40 * appear * (1f - pressProgress)));
+                c.drawCircle(tx, ty, sz * 0.4f, sparkPaint);
+            }
         }
     }
 
@@ -171,39 +264,6 @@ public class ScanBubbleView extends View {
         p.lineTo(cx - size * 0.12f, cy + size * 0.42f);
         p.lineTo(cx + size * 0.62f, cy - size * 0.48f);
         c.drawPath(p, tick);
-    }
-
-    private void drawDone(Canvas c, int w, int h) {
-        RectF box = new RectF(dp(1), dp(1), w - dp(1), h - dp(1));
-        float rad = h / 2f;
-        c.drawRoundRect(box, rad, rad, bg);
-
-        Paint stroke = new Paint(ringBg);
-        stroke.setColor(0x40FFFFFF);
-        c.drawRoundRect(box, rad, rad, stroke);
-
-        // Иконка копирования слева — чтобы назначение читалось без текста.
-        float ix = h * 0.52f, iy = h / 2f, s = h * 0.19f;
-        Paint ic = new Paint(tick);
-        ic.setStrokeWidth(dp(1.8f));
-        c.drawRoundRect(new RectF(ix - s * 0.15f, iy - s * 0.55f, ix + s * 1.1f, iy + s * 1.0f),
-                dp(3), dp(3), ic);
-        Path back = new Path();
-        back.moveTo(ix + s * 0.55f, iy - s * 0.55f);
-        back.lineTo(ix + s * 0.55f, iy - s * 1.0f);
-        back.lineTo(ix - s * 0.75f, iy - s * 1.0f);
-        back.lineTo(ix - s * 0.75f, iy + s * 0.5f);
-        c.drawPath(back, ic);
-
-        num.setTextSize(sp(14));
-        num.setTextAlign(Paint.Align.LEFT);
-        float tx = h * 0.95f;
-        c.drawText("Копировать", tx, h / 2f - dp(2), num);
-        cap.setTextSize(sp(9.5f));
-        cap.setTextAlign(Paint.Align.LEFT);
-        c.drawText(count + " " + lineWord(count) + " · нажмите", tx, h / 2f + dp(11), cap);
-        num.setTextAlign(Paint.Align.CENTER);
-        cap.setTextAlign(Paint.Align.CENTER);
     }
 
     private float dp(float v) {

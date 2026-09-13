@@ -397,6 +397,7 @@ public class OverlayService extends Service {
             float startX, startY;
             int origX, origY;
             boolean moved;
+            boolean longPressHandled;
 
             @Override
             public boolean onTouch(View v, MotionEvent e) {
@@ -407,12 +408,28 @@ public class OverlayService extends Service {
                         origX = bubbleParams.x;
                         origY = bubbleParams.y;
                         moved = false;
+                        longPressHandled = false;
                         bubble.setAlpha(1f);
+                        // Если скан закончен — запускаем анимацию искр
+                        // и таймер долгого зажатия 2.5с → открыть правку.
+                        if (finished) {
+                            bubble.startLongPressAnim();
+                            ui.postDelayed(() -> {
+                                if (!moved && finished && bubble != null) {
+                                    longPressHandled = true;
+                                    bubble.cancelLongPressAnim();
+                                    openResult();
+                                }
+                            }, 2500);
+                        }
                         return true;
                     case MotionEvent.ACTION_MOVE: {
                         int dx = (int) (e.getRawX() - startX);
                         int dy = (int) (e.getRawY() - startY);
-                        if (Math.abs(dx) > slop || Math.abs(dy) > slop) moved = true;
+                        if (Math.abs(dx) > slop || Math.abs(dy) > slop) {
+                            moved = true;
+                            if (finished) bubble.cancelLongPressAnim();
+                        }
                         bubbleParams.x = ZoneGeometry.clamp(origX + dx, 0,
                                 Math.max(0, screenW - bubble.getWidth()));
                         bubbleParams.y = ZoneGeometry.clamp(origY + dy, 0,
@@ -423,7 +440,8 @@ public class OverlayService extends Service {
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
                         bubble.setAlpha(finished ? 0.96f : 0.78f);
-                        if (!moved) onBubbleTap();
+                        if (finished) bubble.cancelLongPressAnim();
+                        if (!moved && !longPressHandled) onBubbleTap();
                         return true;
                 }
                 return false;
@@ -435,7 +453,8 @@ public class OverlayService extends Service {
         if (scanning) {
             finishScanning();
         } else if (finished) {
-            openResult();
+            // Тап по кнопке «Копировать» → сразу в буфер, шарик исчезает.
+            copyToClipboard();
         }
     }
 
@@ -455,7 +474,8 @@ public class OverlayService extends Service {
         }
 
         // Кнопка РАСТЁТ и меняет назначение — второй кнопки нет по условию.
-        int w = dp(190), h = dp(52);
+        // Минималистичная пилюля: иконка + число строк.
+        int w = dp(110), h = dp(44);
         bubbleParams.width = w;
         bubbleParams.height = h;
         bubbleParams.x = ZoneGeometry.clamp(bubbleParams.x, 0, Math.max(0, screenW - w));
@@ -466,7 +486,7 @@ public class OverlayService extends Service {
         wm.updateViewLayout(bubble, bubbleParams);
 
         saveToFile();
-        updateNotification("Прочитано строк: " + acc.size() + ". Нажмите кнопку.");
+        updateNotification("Прочитано: " + acc.keptSize() + " строк. Тап=копировать, зажать=правка.");
     }
 
     /**
@@ -482,6 +502,33 @@ public class OverlayService extends Service {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         // Кнопку убираем, сервис останавливаем: работа передана экрану.
         stopEverything();
+    }
+
+    /**
+     * Тап по кнопке «Копировать» — текст сразу в буфер обмена.
+     * Шарик исчезает с экрана, результат сохранён в файл.
+     */
+    private void copyToClipboard() {
+        saveToFile();
+        String text = acc.text();
+        android.content.ClipboardManager cm =
+                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                "ScreenTextScan", text));
+        Toast.makeText(this,
+                "Скопировано: " + acc.keptSize() + " " + lineWord(acc.keptSize()),
+                Toast.LENGTH_SHORT).show();
+        stopEverything();
+    }
+
+    private static String lineWord(int n) {
+        int t = n % 100;
+        if (t >= 11 && t <= 14) return "строк";
+        switch (n % 10) {
+            case 1: return "строка";
+            case 2: case 3: case 4: return "строки";
+            default: return "строк";
+        }
     }
 
     /**
