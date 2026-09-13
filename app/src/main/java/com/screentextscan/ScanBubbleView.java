@@ -8,39 +8,39 @@ import android.graphics.Path;
 import android.graphics.RectF;
 import android.util.TypedValue;
 import android.view.View;
-import android.view.animation.OvershootInterpolator;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
 /**
- * Минималистичный плавающий шарик с анимацией искр при долгом зажатии.
+ * Минималистичный плавающий круг. Один размер во всех состояниях.
  *
  * СОСТОЯНИЯ:
- *   READING — маленький тёмный круг с числом строк и кольцом готовности.
- *   DONE    — аккуратная пилюля с иконкой копирования.
+ *   READING — тёмный круг с числом строк и кольцом готовности.
+ *   DONE    — тот же круг, но с иконкой копирования вместо числа.
  *
- * ВЗАИМОДЕЙСТВИЕ (управляется из OverlayService):
- *   тап по DONE         → копировать в буфер, шарик исчезает
- *   долгое зажатие 2.5с  → анимация искр → открыть экран правки
+ * АНИМАЦИИ:
+ *   pulseNewText() — при появлении нового текста частицы «всасываются»
+ *     в круг со всех сторон. Плавный эффект поглощения.
+ *   startLongPressAnim() — при долгом зажатии искры сходятся к центру
+ *     с пульсирующим кольцом прогресса.
+ *   pop() — круг лопается: расширение → частицы наружу → ripple → затухание.
  *
- * ИСКРЫ: при зажатии частицы сходятся со всех сторон к центру.
- * Не огонь — мягкие белый/голубой/сиреневый. Сопровождаются лёгким
- * пульсирующим кольцом прогресса.
+ * ВЗАИМОДЕЙСТВИЕ (из OverlayService):
+ *   тап по DONE        → копировать в буфер + pop + вибрация
+ *   долгое зажатие 2.5с → искры → pop + вибрация → убрать с экрана
  */
 public class ScanBubbleView extends View {
 
     public enum State { READING, DONE }
 
-    // --- палитра: тёмный минимализм + холодные искры ---
+    // --- палитра ---
     private static final int BG       = 0xF0101014;
     private static final int FG       = 0xFFFFFFFF;
     private static final int RING_DIM = 0x22FFFFFF;
     private static final int RING_FG  = 0xFFFFFFFF;
-    private static final int SUBTLE   = 0x99FFFFFF;
 
-    // цвета искр — не огонь, холодный спектр
     private static final int[] SPARK_COLORS = {
         0xCCFFFFFF, 0xAA88CCFF, 0xAA88AACC, 0xAAAACCFF, 0xCCDDFFFF
     };
@@ -51,11 +51,26 @@ public class ScanBubbleView extends View {
     private final Paint num    = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint tick   = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint sparkPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    // переиспользуемые объекты для draw — без аллокаций в onDraw
+    private final Paint tmpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF tmpRect = new RectF();
+    private final Path tmpPath = new Path();
 
     private State state = State.READING;
     private int count;
     private float readiness;
     private boolean complete;
+
+    // --- анимация всасывания при новом тексте ---
+    private static final long ABSORB_MS = 700;
+    private static final int ABSORB_COUNT = 12;
+    private boolean absorbing = false;
+    private long absorbStart;
+    private final List<AbsorbParticle> absorbParticles = new ArrayList<>();
+    private static class AbsorbParticle {
+        float angle, startDist, size;
+        int color;
+    }
 
     // --- анимация искр при долгом зажатии ---
     private static final int SPARK_COUNT = 28;
@@ -64,28 +79,26 @@ public class ScanBubbleView extends View {
     private final Random rnd = new Random();
     private long pressStart;
     private boolean pressing;
-    private float pressProgress; // 0..1 за 2.5с
-    private float pulse;          // лёгкая пульсация
+    private float pressProgress;
+    private float pulse;
 
     // --- анимация лопающегося пузыря ---
-    private static final long POP_MS = 380;
+    private static final long POP_MS = 450;
     private boolean popping = false;
     private long popStart;
-    private float popProgress; // 0..1
+    private float popProgress;
     private final List<BurstParticle> burst = new ArrayList<>();
     private Runnable onPopDone;
 
     private static class BurstParticle {
         float angle, dist, size;
         int color;
+        float speed;
     }
 
     private static class Spark {
-        float angle;    // направление от центра
-        float startDist; // начальная дистанция
-        float size;
+        float angle, startDist, size;
         int color;
-        float phase;     // 0..1 — насколько искра приблизилась
     }
 
     public ScanBubbleView(Context c) {
@@ -123,7 +136,26 @@ public class ScanBubbleView extends View {
         invalidate();
     }
 
-    /** Начать анимацию долгого зажатия. */
+    // === ЭФФЕКТ ВСАСЫВАНИЯ ===
+
+    /** Вызывается при появлении нового текста. Частицы «всасываются» в круг. */
+    public void pulseNewText() {
+        absorbing = true;
+        absorbStart = System.currentTimeMillis();
+        absorbParticles.clear();
+        for (int i = 0; i < ABSORB_COUNT; i++) {
+            AbsorbParticle p = new AbsorbParticle();
+            p.angle = (float) (i * (2 * Math.PI / ABSORB_COUNT)) + rnd.nextFloat() * 0.5f;
+            p.startDist = dp(50 + rnd.nextInt(40));
+            p.size = dp(1.5f + rnd.nextFloat() * 2f);
+            p.color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
+            absorbParticles.add(p);
+        }
+        invalidate();
+    }
+
+    // === ДОЛГОЕ ЗАЖАТИЕ ===
+
     public void startLongPressAnim() {
         pressing = true;
         pressStart = System.currentTimeMillis();
@@ -135,13 +167,11 @@ public class ScanBubbleView extends View {
             s.startDist = dp(80 + rnd.nextInt(60));
             s.size = dp(1.5f + rnd.nextFloat() * 2.5f);
             s.color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
-            s.phase = 0;
             sparks.add(s);
         }
         invalidate();
     }
 
-    /** Отменить анимацию (палец отпустили раньше или сдвинули). */
     public void cancelLongPressAnim() {
         pressing = false;
         sparks.clear();
@@ -149,150 +179,94 @@ public class ScanBubbleView extends View {
         invalidate();
     }
 
-    public boolean isLongPressReached() {
-        return pressing && System.currentTimeMillis() - pressStart >= LONG_PRESS_MS;
-    }
+    // === POP ===
 
-    /**
-     * Анимация лопающегося пузыря: лёгкое расширение → burst-частицы
-     * разлетаются наружу → всё затухает. После завершения вызывает callback.
-     */
     public void pop(Runnable done) {
         onPopDone = done;
         popping = true;
         popStart = System.currentTimeMillis();
         popProgress = 0;
-        // частицы разлетаются наружу от центра
         burst.clear();
-        for (int i = 0; i < 18; i++) {
+        for (int i = 0; i < 24; i++) {
             BurstParticle p = new BurstParticle();
-            p.angle = (float) (i * (2 * Math.PI / 18)) + rnd.nextFloat() * 0.4f;
+            p.angle = (float) (i * (2 * Math.PI / 24)) + rnd.nextFloat() * 0.35f;
             p.dist = 0;
-            p.size = dp(2 + rnd.nextFloat() * 3);
+            p.size = dp(2 + rnd.nextFloat() * 4);
+            p.speed = 0.8f + rnd.nextFloat() * 0.6f;
             p.color = SPARK_COLORS[rnd.nextInt(SPARK_COLORS.length)];
             burst.add(p);
         }
         invalidate();
     }
 
+    // === ONDRAW ===
+
     @Override
     protected void onDraw(Canvas c) {
         int w = getWidth(), h = getHeight();
         if (w == 0 || h == 0) return;
+        float cx = w / 2f, cy = h / 2f;
+        float r = Math.min(w, h) / 2f - dp(3);
 
-        // обновить прогресс зажатия
+        // pop имеет приоритет — рисуем только его
+        if (popping) {
+            long elapsed = System.currentTimeMillis() - popStart;
+            popProgress = Math.min(1f, (float) elapsed / POP_MS);
+            drawPop(c, w, h, cx, cy, r);
+            if (popProgress >= 1f) {
+                popping = false;
+                // Используем post() — нельзя removeView внутри onDraw
+                final Runnable cb = onPopDone;
+                onPopDone = null;
+                if (cb != null) post(cb);
+            } else {
+                invalidate();
+            }
+            return;
+        }
+
+        // основной круг
+        if (state == State.DONE) {
+            drawDone(c, w, h, cx, cy, r);
+        } else {
+            drawReading(c, w, h, cx, cy, r);
+        }
+
+        // обновление прогресса зажатия
+        boolean needInvalidate = false;
         if (pressing) {
             long elapsed = System.currentTimeMillis() - pressStart;
             pressProgress = Math.min(1f, (float) elapsed / LONG_PRESS_MS);
             pulse = (float) (0.5 + 0.5 * Math.sin(elapsed * 0.012));
+            drawSparks(c, w, h, cx, cy);
+            if (pressProgress < 1f) drawPressRing(c, w, h, cx, cy);
+            needInvalidate = true;
         }
 
-        // обновить прогресс pop-анимации
-        if (popping) {
-            long elapsed = System.currentTimeMillis() - popStart;
-            popProgress = Math.min(1f, (float) elapsed / POP_MS);
-            if (popProgress >= 1f) {
-                popping = false;
-                if (onPopDone != null) {
-                    Runnable r = onPopDone;
-                    onPopDone = null;
-                    r.run();
-                }
-                return; // больше не рисуем
+        // всасывание
+        if (absorbing) {
+            long elapsed = System.currentTimeMillis() - absorbStart;
+            float ap = Math.min(1f, (float) elapsed / ABSORB_MS);
+            drawAbsorb(c, w, h, cx, cy, r, ap);
+            if (ap >= 1f) {
+                absorbing = false;
+                absorbParticles.clear();
             }
+            needInvalidate = true;
         }
 
-        if (popping) {
-            drawPop(c, w, h);
-            invalidate();
-            return;
-        }
-
-        if (state == State.DONE) {
-            drawDone(c, w, h);
-        } else {
-            drawReading(c, w, h);
-        }
-
-        // искры рисуем поверх в любом состоянии при зажатии
-        if (pressing && pressProgress > 0) {
-            drawSparks(c, w, h);
-            if (pressProgress < 1f) drawPressRing(c, w, h);
-            invalidate();
-        }
+        if (needInvalidate) invalidate();
     }
 
-    /** Лопающийся пузырь: расширение → ripple → burst-частицы → затухание. */
-    private void drawPop(Canvas c, int w, int h) {
-        float cx = w / 2f, cy = h / 2f;
-        float p = popProgress;
+    // === РИСОВАНИЕ ===
 
-        // 1) расширение (0..0.25) → сжатие с overshoot (0.25..0.5) → исчезновение
-        float scale;
-        if (p < 0.25f) {
-            scale = 1f + p * 0.8f;         // 1.0 → 1.2
-        } else if (p < 0.45f) {
-            float t = (p - 0.25f) / 0.2f;  // 0..1
-            scale = 1.2f - t * 1.2f;       // 1.2 → 0
-        } else {
-            scale = 0;
-        }
-        int alpha = (int) (255 * (1f - p * p));
-
-        // 2) рисуем пузырь с scale и затуханием
-        if (scale > 0 && alpha > 0) {
-            c.save();
-            c.scale(scale, scale, cx, cy);
-            bg.setAlpha(alpha);
-            if (state == State.DONE) {
-                RectF box = new RectF(dp(1), dp(1), w - dp(1), h - dp(1));
-                c.drawRoundRect(box, h / 2f, h / 2f, bg);
-            } else {
-                float r = Math.min(w, h) / 2f - dp(3);
-                c.drawCircle(cx, cy, r, bg);
-            }
-            bg.setAlpha(255);
-            c.restore();
-        }
-
-        // 3) ripple — расходящееся кольцо
-        if (p < 0.6f) {
-            float rippleR = Math.max(w, h) / 2f * (0.5f + p * 1.5f);
-            float rippleA = (1f - p / 0.6f) * 0.4f;
-            Paint rp = new Paint(Paint.ANTI_ALIAS_FLAG);
-            rp.setStyle(Paint.Style.STROKE);
-            rp.setStrokeWidth(dp(2));
-            rp.setColor(0xCCFFFFFF);
-            rp.setAlpha((int) (255 * rippleA));
-            c.drawCircle(cx, cy, rippleR, rp);
-        }
-
-        // 4) burst-частицы разлетаются наружу
-        for (BurstParticle bp : burst) {
-            float t = p;
-            bp.dist = dp(30 + t * 80);
-            float x = cx + (float) Math.cos(bp.angle) * bp.dist;
-            float y = cy + (float) Math.sin(bp.angle) * bp.dist;
-            float sz = bp.size * (1f - t * 0.6f);
-            int a = (int) (Color.alpha(bp.color) * (1f - t));
-            if (a <= 0 || sz <= 0) continue;
-            sparkPaint.setColor(bp.color);
-            sparkPaint.setAlpha(a);
-            c.drawCircle(x, y, sz, sparkPaint);
-        }
-    }
-
-    private void drawReading(Canvas c, int w, int h) {
-        float cx = w / 2f, cy = h / 2f;
-        float r = Math.min(w, h) / 2f - dp(3);
-
+    private void drawReading(Canvas c, int w, int h, float cx, float cy, float r) {
         c.drawCircle(cx, cy, r, bg);
 
-        RectF oval = new RectF(cx - r + dp(2), cy - r + dp(2),
-                               cx + r - dp(2), cy + r - dp(2));
-        c.drawArc(oval, 0, 360, false, ringBg);
+        tmpRect.set(cx - r + dp(2), cy - r + dp(2), cx + r - dp(2), cy + r - dp(2));
+        c.drawArc(tmpRect, 0, 360, false, ringBg);
         if (readiness > 0) {
-            c.drawArc(oval, -90, 360 * readiness, false, ring);
+            c.drawArc(tmpRect, -90, 360 * readiness, false, ring);
         }
 
         if (complete) {
@@ -303,81 +277,166 @@ public class ScanBubbleView extends View {
         }
     }
 
-    private void drawDone(Canvas c, int w, int h) {
-        // минималистичная пилюля со скруглением
-        RectF box = new RectF(dp(1), dp(1), w - dp(1), h - dp(1));
-        float rad = h / 2f;
-        c.drawRoundRect(box, rad, rad, bg);
+    private void drawDone(Canvas c, int w, int h, float cx, float cy, float r) {
+        c.drawCircle(cx, cy, r, bg);
 
-        // тонкая обводка
-        Paint stroke = new Paint(ringBg);
-        stroke.setColor(0x30FFFFFF);
-        c.drawRoundRect(box, rad, rad, stroke);
+        tmpPaint.set(ringBg);
+        tmpPaint.setColor(0x28FFFFFF);
+        c.drawCircle(cx, cy, r, tmpPaint);
 
-        // иконка копирования — две накладывающиеся скруглённые рамки
-        float ix = h * 0.5f, iy = h / 2f, s = h * 0.22f;
-        Paint ic = new Paint(tick);
-        ic.setStrokeWidth(dp(1.6f));
-        ic.setStyle(Paint.Style.STROKE);
-        // задняя рамка
-        RectF back = new RectF(ix - s * 0.1f, iy - s * 0.8f, ix + s * 1.2f, iy + s * 0.5f);
-        c.drawRoundRect(back, dp(3), dp(3), ic);
-        // передняя рамка
-        RectF front = new RectF(ix - s * 0.8f, iy - s * 0.5f, ix + s * 0.5f, iy + s * 0.8f);
-        c.drawRoundRect(front, dp(3), dp(3), ic);
+        float s = r * 0.42f;
+        tmpPaint.set(tick);
+        tmpPaint.setStrokeWidth(dp(1.6f));
+        tmpPaint.setStyle(Paint.Style.STROKE);
+        tmpRect.set(cx - s * 0.15f, cy - s * 0.85f, cx + s * 1.15f, cy + s * 0.45f);
+        c.drawRoundRect(tmpRect, dp(3), dp(3), tmpPaint);
+        tmpRect.set(cx - s * 0.85f, cy - s * 0.45f, cx + s * 0.45f, cy + s * 0.85f);
+        c.drawRoundRect(tmpRect, dp(3), dp(3), tmpPaint);
 
-        // число строк справа от иконки
-        num.setTextSize(sp(14));
-        num.setTextAlign(Paint.Align.LEFT);
-        c.drawText(String.valueOf(count), h * 0.85f, h / 2f + dp(5), num);
-        num.setTextAlign(Paint.Align.CENTER);
+        tmpPaint.set(num);
+        tmpPaint.setTextSize(sp(9));
+        tmpPaint.setFakeBoldText(false);
+        tmpPaint.setColor(0xB3FFFFFF);
+        c.drawText(String.valueOf(count), cx, cy + r * 0.82f, tmpPaint);
     }
 
-    /** Кольцо прогресса долгого зажатия вокруг шарика. */
-    private void drawPressRing(Canvas c, int w, int h) {
-        float cx = w / 2f, cy = h / 2f;
-        float r = Math.max(w, h) / 2f + dp(6 + pulse * 3);
-        RectF oval = new RectF(cx - r, cy - r, cx + r, cy + r);
-        Paint p = new Paint(ring);
-        p.setStrokeWidth(dp(2.5f + pulse));
-        p.setColor(0x66AACCFF);
-        c.drawArc(oval, -90, 360 * pressProgress, false, p);
+    /** Эффект всасывания: частицы плавно стягиваются к центру круга. */
+    private void drawAbsorb(Canvas c, int w, int h, float cx, float cy, float r, float p) {
+        for (AbsorbParticle ap : absorbParticles) {
+            // частица движется от startDist к r (границе круга)
+            float dist = ap.startDist * (1f - p) + r * 0.3f * (1f - p);
+            // лёгкая задержка появления
+            float appear = Math.min(1f, p * 2f);
+            if (appear <= 0) continue;
+            // затухание по мере приближения к кругу
+            float fade = (1f - p) * appear;
+            int alpha = (int) (Color.alpha(ap.color) * fade);
+            if (alpha <= 0) continue;
+
+            float x = cx + (float) Math.cos(ap.angle) * dist;
+            float y = cy + (float) Math.sin(ap.angle) * dist;
+            float sz = ap.size * appear * (0.5f + 0.5f * (1f - p));
+
+            sparkPaint.setColor(ap.color);
+            sparkPaint.setAlpha(alpha);
+            c.drawCircle(x, y, sz, sparkPaint);
+
+            // тонкий след за частицей
+            float trailDist = dist + dp(6);
+            float tx = cx + (float) Math.cos(ap.angle) * trailDist;
+            float ty = cy + (float) Math.sin(ap.angle) * trailDist;
+            sparkPaint.setAlpha((int) (30 * fade));
+            c.drawCircle(tx, ty, sz * 0.3f, sparkPaint);
+        }
     }
 
-    /** Идущие к центру искры. */
-    private void drawSparks(Canvas c, int w, int h) {
-        float cx = w / 2f, cy = h / 2f;
+    private void drawSparks(Canvas c, int w, int h, float cx, float cy) {
         for (Spark s : sparks) {
-            // каждая искра движется от startDist к 0 (центру)
             float dist = s.startDist * (1f - pressProgress);
-            // лёгкая волна — искры появляются не все сразу
             float appear = Math.min(1f, pressProgress * 1.5f + s.angle * 0.05f);
             if (appear <= 0) continue;
             float x = cx + (float) Math.cos(s.angle) * dist;
             float y = cy + (float) Math.sin(s.angle) * dist;
             float sz = s.size * appear * (1f - pressProgress * 0.5f);
-
             sparkPaint.setColor(s.color);
             sparkPaint.setAlpha((int) (Color.alpha(s.color) * appear * (1f - pressProgress * 0.3f)));
             c.drawCircle(x, y, sz, sparkPaint);
-
-            // лёгкий след
             if (pressProgress > 0.2f) {
                 float trail = dist + dp(8);
-                float tx = cx + (float) Math.cos(s.angle) * trail;
-                float ty = cy + (float) Math.sin(s.angle) * trail;
                 sparkPaint.setAlpha((int) (40 * appear * (1f - pressProgress)));
-                c.drawCircle(tx, ty, sz * 0.4f, sparkPaint);
+                c.drawCircle(cx + (float) Math.cos(s.angle) * trail,
+                              cy + (float) Math.sin(s.angle) * trail,
+                              sz * 0.4f, sparkPaint);
             }
         }
     }
 
+    private void drawPressRing(Canvas c, int w, int h, float cx, float cy) {
+        float r = Math.max(w, h) / 2f + dp(6 + pulse * 3);
+        tmpRect.set(cx - r, cy - r, cx + r, cy + r);
+        tmpPaint.set(ring);
+        tmpPaint.setStrokeWidth(dp(2.5f + pulse));
+        tmpPaint.setColor(0x66AACCFF);
+        c.drawArc(tmpRect, -90, 360 * pressProgress, false, tmpPaint);
+    }
+
+    /** Лопающийся пузырь — красивый, многослойный эффект. */
+    private void drawPop(Canvas c, int w, int h, float cx, float cy, float r) {
+        float p = popProgress;
+
+        float scale;
+        if (p < 0.2f) {
+            scale = 1f + p * 1.0f;
+        } else if (p < 0.45f) {
+            float t = (p - 0.2f) / 0.25f;
+            scale = 1.2f - t * 1.2f;
+        } else {
+            scale = 0;
+        }
+        int alpha = (int) (255 * (1f - p * p));
+
+        if (scale > 0 && alpha > 0) {
+            c.save();
+            c.scale(scale, scale, cx, cy);
+            bg.setAlpha(alpha);
+            c.drawCircle(cx, cy, r, bg);
+            if (alpha > 60) {
+                ring.setAlpha(alpha);
+                c.drawCircle(cx, cy, r - dp(2), ring);
+                ring.setAlpha(255);
+            }
+            bg.setAlpha(255);
+            c.restore();
+        }
+
+        for (int i = 0; i < 2; i++) {
+            float ringP = p - i * 0.15f;
+            if (ringP < 0 || ringP > 0.7f) continue;
+            float rr = r * (1f + ringP * (2f + i));
+            float ra = (1f - ringP / 0.7f) * (0.5f - i * 0.2f);
+            if (ra <= 0) continue;
+            tmpPaint.setStyle(Paint.Style.STROKE);
+            tmpPaint.setStrokeWidth(dp(2 - i * 0.5f));
+            tmpPaint.setColor(0xDDFFFFFF);
+            tmpPaint.setAlpha((int) (255 * ra));
+            c.drawCircle(cx, cy, rr, tmpPaint);
+        }
+
+        for (BurstParticle bp : burst) {
+            float t = p * bp.speed;
+            bp.dist = r * 0.5f + t * r * 2.5f;
+            float x = cx + (float) Math.cos(bp.angle) * bp.dist;
+            float y = cy + (float) Math.sin(bp.angle) * bp.dist;
+            float sz = bp.size * (1f - t * 0.5f);
+            int a = (int) (Color.alpha(bp.color) * Math.max(0, 1f - t));
+            if (a <= 0 || sz <= 0) continue;
+            sparkPaint.setColor(bp.color);
+            sparkPaint.setAlpha(a);
+            c.drawCircle(x, y, sz, sparkPaint);
+            float trailD = bp.dist - dp(10);
+            if (trailD > 0) {
+                sparkPaint.setAlpha((int) (a * 0.3f));
+                c.drawCircle(cx + (float) Math.cos(bp.angle) * trailD,
+                              cy + (float) Math.sin(bp.angle) * trailD,
+                              sz * 0.4f, sparkPaint);
+            }
+        }
+
+        if (p < 0.35f) {
+            float flashA = (1f - p / 0.35f) * 0.5f;
+            tmpPaint.setStyle(Paint.Style.FILL);
+            tmpPaint.setColor(0xFFFFFFFF);
+            tmpPaint.setAlpha((int) (255 * flashA));
+            c.drawCircle(cx, cy, r * (0.3f + p * 0.4f), tmpPaint);
+        }
+    }
+
     private void drawTick(Canvas c, float cx, float cy, float size) {
-        Path p = new Path();
-        p.moveTo(cx - size * 0.55f, cy - size * 0.05f);
-        p.lineTo(cx - size * 0.12f, cy + size * 0.42f);
-        p.lineTo(cx + size * 0.62f, cy - size * 0.48f);
-        c.drawPath(p, tick);
+        tmpPath.reset();
+        tmpPath.moveTo(cx - size * 0.55f, cy - size * 0.05f);
+        tmpPath.lineTo(cx - size * 0.12f, cy + size * 0.42f);
+        tmpPath.lineTo(cx + size * 0.62f, cy - size * 0.48f);
+        c.drawPath(tmpPath, tick);
     }
 
     private float dp(float v) {

@@ -333,7 +333,11 @@ public class OverlayService extends Service {
                 }
                 List<String> texts = ReadingOrder.sort(items);
                 int added = acc.addAll(texts);
-                if (added > 0) lastNewAt = System.currentTimeMillis();
+                if (added > 0) {
+                    lastNewAt = System.currentTimeMillis();
+                    // Визуальный эффект всасывания — частицы стягиваются к кругу.
+                    if (bubble != null) bubble.pulseNewText();
+                }
             }
 
             long idle = System.currentTimeMillis() - lastNewAt;
@@ -401,6 +405,7 @@ public class OverlayService extends Service {
             int origX, origY;
             boolean moved;
             boolean longPressHandled;
+            Runnable longPressCallback;
 
             @Override
             public boolean onTouch(View v, MotionEvent e) {
@@ -413,18 +418,17 @@ public class OverlayService extends Service {
                         moved = false;
                         longPressHandled = false;
                         bubble.setAlpha(1f);
-                        // Если скан закончен — запускаем анимацию искр
-                        // и таймер 2.5с → убрать кружок с экрана.
                         if (finished) {
                             bubble.startLongPressAnim();
-                            ui.postDelayed(() -> {
+                            longPressCallback = () -> {
                                 if (!moved && finished && bubble != null) {
                                     longPressHandled = true;
                                     bubble.cancelLongPressAnim();
                                     vibrate(true);
                                     bubble.pop(() -> stopEverything());
                                 }
-                            }, 2500);
+                            };
+                            ui.postDelayed(longPressCallback, 2500);
                         }
                         return true;
                     case MotionEvent.ACTION_MOVE: {
@@ -443,6 +447,11 @@ public class OverlayService extends Service {
                     }
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
+                        // Отменить ожидающий long-press таймер.
+                        if (longPressCallback != null) {
+                            ui.removeCallbacks(longPressCallback);
+                            longPressCallback = null;
+                        }
                         bubble.setAlpha(finished ? 0.96f : 0.78f);
                         if (finished) bubble.cancelLongPressAnim();
                         if (!moved && !longPressHandled) onBubbleTap();
@@ -481,13 +490,7 @@ public class OverlayService extends Service {
             return;
         }
 
-        // Кнопка РАСТЁТ и меняет назначение — второй кнопки нет по условию.
-        // Минималистичная пилюля: иконка + число строк.
-        int w = dp(110), h = dp(44);
-        bubbleParams.width = w;
-        bubbleParams.height = h;
-        bubbleParams.x = ZoneGeometry.clamp(bubbleParams.x, 0, Math.max(0, screenW - w));
-        bubbleParams.y = ZoneGeometry.clamp(bubbleParams.y, 0, Math.max(0, screenH - h));
+        // КРУГ остаётся такого же размера — меняем только содержимое.
         bubble.setState(ScanBubbleView.State.DONE);
         bubble.setCount(acc.keptSize());
         bubble.setAlpha(0.96f);
