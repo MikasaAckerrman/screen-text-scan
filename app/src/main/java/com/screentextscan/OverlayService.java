@@ -80,7 +80,6 @@ public class OverlayService extends Service {
 
     private Rect zone;
     private boolean scanning;
-    private boolean finished;
     private long lastNewAt;
     private int screenW, screenH;
     /** Пакет приложения, которое читаем. При смене — останавливаем скан. */
@@ -276,15 +275,10 @@ public class OverlayService extends Service {
     private void startScanning() {
         acc.clear();
         scanning = true;
-        finished = false;
         lastNewAt = System.currentTimeMillis();
-        // scanningPackage устанавливается на первом poll, где виден реальный
-        // пакет (не наш overlay). Если установить здесь, getActiveWindowPackage
-        // вернёт com.screentextscan (наш overlay ещё активен) → при смене на
-        // целевое приложение poll решит «пакет сменился» → стоп.
         scanningPackage = null;
         showBubble();
-        updateNotification("Читаю. Листайте текст.");
+        updateNotification("Читаю. Листайте текст. Тап=копировать.");
         ui.postDelayed(poll, POLL_MS);
     }
 
@@ -301,18 +295,19 @@ public class OverlayService extends Service {
                 } else if ("com.screentextscan".equals(currentPkg)) {
                     // Наш overlay — не считаем сменой окна.
                 } else if (isLauncherPackage(currentPkg)) {
-                    // Пользователь вышел на главный экран — стоп.
-                    // Не читаем иконки приложений и виджеты.
-                    finishScanning();
+                    // Пользователь вышел на главный экран — убрать шарик.
+                    stopEverything();
                     return;
                 } else {
                     if (scanningPackage == null) {
-                        // Первый реальный пакет — начинаем отслеживание.
                         scanningPackage = currentPkg;
                     } else if (!scanningPackage.equals(currentPkg)) {
-                        // Пакет сменился — пользователь переключил приложение.
-                        finishScanning();
-                        return;
+                        // Пакет сменился — копируем накопленное и продолжаем.
+                        if (acc.size() > 0) {
+                            copyToClipboard();
+                            acc.clear();
+                        }
+                        scanningPackage = currentPkg;
                     }
                 }
 
@@ -355,7 +350,7 @@ public class OverlayService extends Service {
             }
 
             if (idle > IDLE_LIMIT_MS) {
-                finishScanning();
+                stopEverything();
                 return;
             }
             ui.postDelayed(this, POLL_MS);
@@ -364,29 +359,22 @@ public class OverlayService extends Service {
 
     private void showBubble() {
         bubble = new ScanBubbleView(this);
-        bubble.setState(ScanBubbleView.State.READING);
         bubble.setCount(0);
 
-        int size = dp(62);
+        // View = 200dp — чтобы искры и burst помещались полностью.
+        // Рисуемый круг = 62dp по центру View.
+        int viewSize = dp(200);
         bubbleParams = new WindowManager.LayoutParams(
-                size, size,
+                viewSize, viewSize,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                /*
-                 * FLAG_NOT_FOCUSABLE обязателен: с фокусом наше окно стало бы
-                 * активным, и служба доступности начала бы читать ЕГО вместо
-                 * приложения под ним. Плюс пропала бы возможность листать.
-                 */
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         bubbleParams.gravity = Gravity.TOP | Gravity.START;
-        bubbleParams.x = screenW - size - dp(14);
-        bubbleParams.y = screenH * 2 / 3;
-        /*
-         * Полупрозрачность — требование «кнопка не должна мешать читать,
-         * где бы она ни находилась». При касании возвращаем полную
-         * видимость, чтобы палец видел, что тащит.
-         */
-        bubble.setAlpha(0.78f);
+        // Сдвигаем так, чтобы круг 62dp был у правого края как раньше
+        int circleSize = dp(62);
+        bubbleParams.x = screenW - circleSize - dp(14) - (viewSize - circleSize) / 2;
+        bubbleParams.y = screenH * 2 / 3 - (viewSize - circleSize) / 2;
+        bubble.setAlpha(0.82f);
         wm.addView(bubble, bubbleParams);
         attachDragAndTap();
     }
@@ -409,34 +397,41 @@ public class OverlayService extends Service {
 
             @Override
             public boolean onTouch(View v, MotionEvent e) {
+                // Проверяем, что касание в пределах круга (не в пустой области View)
+                float dxFromCenter = e.getX() - v.getWidth() / 2f;
+                float dyFromCenter = e.getY() - v.getHeight() / 2f;
+                float distFromCenter = (float) Math.sqrt(dxFromCenter * dxFromCenter + dyFromCenter * dyFromCenter);
+                boolean inCircle = distFromCenter <= dp(31);
+
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        if (!inCircle) return false; // касание мимо круга → пропустить
                         startX = e.getRawX();
                         startY = e.getRawY();
                         origX = bubbleParams.x;
                         origY = bubbleParams.y;
                         moved = false;
                         longPressHandled = false;
+                        bubble.onPress();
                         bubble.setAlpha(1f);
-                        if (finished) {
-                            bubble.startLongPressAnim();
-                            longPressCallback = () -> {
-                                if (!moved && finished && bubble != null) {
-                                    longPressHandled = true;
-                                    bubble.cancelLongPressAnim();
-                                    vibrate(true);
-                                    bubble.pop(() -> stopEverything());
-                                }
-                            };
-                            ui.postDelayed(longPressCallback, 2500);
-                        }
+                        // Всегда запускаем таймер 2.5с → убрать шарик
+                        bubble.startLongPressAnim();
+                        longPressCallback = () -> {
+                            if (!moved && bubble != null && scanning) {
+                                longPressHandled = true;
+                                bubble.cancelLongPressAnim();
+                                vibrate(true);
+                                bubble.pop(() -> stopEverything());
+                            }
+                        };
+                        ui.postDelayed(longPressCallback, 2500);
                         return true;
                     case MotionEvent.ACTION_MOVE: {
                         int dx = (int) (e.getRawX() - startX);
                         int dy = (int) (e.getRawY() - startY);
                         if (Math.abs(dx) > slop || Math.abs(dy) > slop) {
                             moved = true;
-                            if (finished) bubble.cancelLongPressAnim();
+                            bubble.cancelLongPressAnim();
                         }
                         bubbleParams.x = ZoneGeometry.clamp(origX + dx, 0,
                                 Math.max(0, screenW - bubble.getWidth()));
@@ -447,13 +442,13 @@ public class OverlayService extends Service {
                     }
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
-                        // Отменить ожидающий long-press таймер.
                         if (longPressCallback != null) {
                             ui.removeCallbacks(longPressCallback);
                             longPressCallback = null;
                         }
-                        bubble.setAlpha(finished ? 0.96f : 0.78f);
-                        if (finished) bubble.cancelLongPressAnim();
+                        bubble.onRelease();
+                        bubble.setAlpha(0.82f);
+                        bubble.cancelLongPressAnim();
                         if (!moved && !longPressHandled) onBubbleTap();
                         return true;
                 }
@@ -462,62 +457,28 @@ public class OverlayService extends Service {
         });
     }
 
+    /** Тап по шарику: копировать накопленный текст + продолжить чтение. */
     private void onBubbleTap() {
-        if (scanning) {
-            finishScanning();
-        } else if (finished) {
-            // Тап по кнопке «Копировать» → вибрация → pop-анимация → буфер → убрать.
+        if (scanning && acc.size() > 0) {
             vibrate(false);
-            bubble.pop(() -> {
-                copyToClipboard();
-                stopEverything();
-            });
+            bubble.flashCopy();
+            copyToClipboard();
+            // Очищаем аккумулятор — новый текст будет копироваться отдельно.
+            acc.clear();
+            lastNewAt = System.currentTimeMillis();
+        } else if (scanning) {
+            Toast.makeText(this, "Текста пока нет — листайте дальше",
+                    Toast.LENGTH_SHORT).show();
         }
     }
 
     /* ==================================================================
-       Шаг 3. Остановка и результат
+       Копирование
        ================================================================== */
 
-    private void finishScanning() {
-        scanning = false;
-        finished = true;
-        ui.removeCallbacks(poll);
-
-        if (acc.size() == 0) {
-            Toast.makeText(this, "Текста в выбранной области не нашлось", Toast.LENGTH_LONG).show();
-            stopEverything();
-            return;
-        }
-
-        // КРУГ остаётся такого же размера — меняем только содержимое.
-        bubble.setState(ScanBubbleView.State.DONE);
-        bubble.setCount(acc.keptSize());
-        bubble.setAlpha(0.96f);
-        wm.updateViewLayout(bubble, bubbleParams);
-
-        saveToFile();
-        updateNotification("Прочитано: " + acc.keptSize() + " строк. Тап=копировать, зажать=убрать.");
-    }
-
     /**
-     * Открыть экран правки.
-     *
-     * Накопитель передаём через статическое поле, а не через Intent: текст с
-     * экрана легко перевалит за лимит Binder-транзакции (около 1 МБ), и
-     * приложение упало бы на большом документе.
-     */
-    private void openResult() {
-        ResultActivity.pending = acc;
-        startActivity(new Intent(this, ResultActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-        // Кнопку убираем, сервис останавливаем: работа передана экрану.
-        stopEverything();
-    }
-
-    /**
-     * Тап по кнопке «Копировать» — текст сразу в буфер обмена.
-     * Шарик исчезает с экрана, результат сохранён в файл.
+     * Копировать накопленный текст в буфер обмена.
+     * Не останавливает скан — пользователь может продолжить чтение.
      */
     private void copyToClipboard() {
         saveToFile();
@@ -529,7 +490,6 @@ public class OverlayService extends Service {
         Toast.makeText(this,
                 "Скопировано: " + acc.keptSize() + " " + lineWord(acc.keptSize()),
                 Toast.LENGTH_SHORT).show();
-        stopEverything();
     }
 
     private static String lineWord(int n) {
