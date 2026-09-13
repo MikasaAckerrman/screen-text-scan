@@ -411,14 +411,15 @@ public class OverlayService extends Service {
                         longPressHandled = false;
                         bubble.setAlpha(1f);
                         // Если скан закончен — запускаем анимацию искр
-                        // и таймер долгого зажатия 2.5с → открыть правку.
+                        // и таймер 2.5с → убрать кружок с экрана.
                         if (finished) {
                             bubble.startLongPressAnim();
                             ui.postDelayed(() -> {
                                 if (!moved && finished && bubble != null) {
                                     longPressHandled = true;
                                     bubble.cancelLongPressAnim();
-                                    openResult();
+                                    // Убрать кружок с экрана — не открывать приложение.
+                                    stopEverything();
                                 }
                             }, 2500);
                         }
@@ -486,7 +487,7 @@ public class OverlayService extends Service {
         wm.updateViewLayout(bubble, bubbleParams);
 
         saveToFile();
-        updateNotification("Прочитано: " + acc.keptSize() + " строк. Тап=копировать, зажать=правка.");
+        updateNotification("Прочитано: " + acc.keptSize() + " строк. Тап=копировать, зажать=убрать.");
     }
 
     /**
