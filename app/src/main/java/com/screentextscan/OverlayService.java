@@ -70,6 +70,14 @@ public class OverlayService extends Service {
      */
     private static final long IDLE_LIMIT_MS = 180_000;
 
+    /**
+     * Окно подтверждения одиночного тапа. Копирование по тапу срабатывает
+     * не мгновенно, а после этого окна: если второй тап пришёл быстрее —
+     * это двойной тап, то есть завершение чтения. Двойной тап и делает
+     * закрытие плавающего окна недоступным одному случайному касанию.
+     */
+    private static final long TAP_CONFIRM_MS = 280;
+
     private WindowManager wm;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final TextAccumulator acc = new TextAccumulator();
@@ -84,13 +92,33 @@ public class OverlayService extends Service {
     private int screenW, screenH;
     /** Пакет приложения, которое читаем. При смене — останавливаем скан. */
     private String scanningPackage;
+    /**
+     * Кеш лаунчера: resolveActivity — это IPC в PackageManager, и звать его
+     * каждые 600 мс в poll() незачем. Лаунчер за время сессии не меняется,
+     * считаем один раз и держим; null = ещё не вычислен.
+     */
+    private String cachedLauncherPackage;
+
+    /** Живой экземпляр сервиса; экран результата берёт из него снапшот. */
+    private static OverlayService instance;
 
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         readScreenSize();
         startForeground(NOTIF_ID, buildNotification("Выберите зону чтения"));
+    }
+
+    /**
+     * Снапшот живого накопителя для экрана результата, открываемого тапом
+     * по уведомлению во время чтения: экран получает замороженную копию,
+     * сервис продолжает копить дальше независимо от него.
+     */
+    static TextAccumulator liveSnapshot() {
+        OverlayService s = instance;
+        return (s != null && s.scanning && s.acc.size() > 0) ? s.snapshotAcc() : null;
     }
 
     /**
@@ -312,7 +340,7 @@ public class OverlayService extends Service {
                 }
 
                 List<ScanAccessibilityService.Line> lines =
-                        svc.readScreen(zone, screenW, screenH, false);
+                        svc.readScreen(zone, screenW, screenH, true);
                 /*
                  * Порядок чтения. Служба доступности обходит дерево по
                  * вложенности элементов, а не сверху вниз — без сортировки
@@ -397,6 +425,18 @@ public class OverlayService extends Service {
 
             @Override
             public boolean onTouch(View v, MotionEvent e) {
+                /*
+                 * КРАШ 24.09 (OverlayService$3.onTouch:437, NPE на null
+                 * поле bubble). Слушатель обязан работать с ЛОКАЛЬНОЙ
+                 * ссылкой на сам view, а не с полем сервиса: poll() и
+                 * stopEverything() снимают шарик и обнуляют поле ВО ВРЕМЯ
+                 * жеста, а система до-доставляет отсоединённому view
+                 * оставшиеся ACTION_MOVE/UP/CANCEL. Обращение к полю на
+                 * этом пути падало на null и убивало весь процесс — вместе
+                 * со службой доступности, которую система после краша
+                 * помечает «работает некорректно».
+                 */
+                final ScanBubbleView bv = (ScanBubbleView) v;
                 // Проверяем, что касание в пределах круга (не в пустой области View)
                 float dxFromCenter = e.getX() - v.getWidth() / 2f;
                 float dyFromCenter = e.getY() - v.getHeight() / 2f;
@@ -412,16 +452,19 @@ public class OverlayService extends Service {
                         origY = bubbleParams.y;
                         moved = false;
                         longPressHandled = false;
-                        bubble.onPress();
-                        bubble.setAlpha(1f);
+                        bv.onPress();
+                        bv.setAlpha(1f);
                         // Всегда запускаем таймер 2.5с → убрать шарик
-                        bubble.startLongPressAnim();
+                        bv.startLongPressAnim();
                         longPressCallback = () -> {
-                            if (bubble != null && scanning) {
+                            // bv == bubble: жест принадлежит ЖИВОМУ шарику.
+                            // Если шарик уже снят или заменён — просто ничего
+                            // не делаем, окно всё равно уходит.
+                            if (bv == bubble && scanning) {
                                 longPressHandled = true;
-                                bubble.cancelLongPressAnim();
+                                bv.cancelLongPressAnim();
                                 vibrate(true);
-                                bubble.pop(() -> stopEverything());
+                                bv.pop(() -> removeSilently());
                             }
                         };
                         ui.postDelayed(longPressCallback, 2500);
@@ -434,10 +477,13 @@ public class OverlayService extends Service {
                         // пользователь может двигать шарик и одновременно
                         // держать для удаления.
                         bubbleParams.x = ZoneGeometry.clamp(origX + dx, 0,
-                                Math.max(0, screenW - bubble.getWidth()));
+                                Math.max(0, screenW - bv.getWidth()));
                         bubbleParams.y = ZoneGeometry.clamp(origY + dy, 0,
-                                Math.max(0, screenH - bubble.getHeight()));
-                        wm.updateViewLayout(bubble, bubbleParams);
+                                Math.max(0, screenH - bv.getHeight()));
+                        // updateViewLayout на снятое окно бросает
+                        // IllegalArgumentException — если жест долетел уже
+                        // после удаления шарика, двигать нечего.
+                        if (bubble == bv) wm.updateViewLayout(bv, bubbleParams);
                         return true;
                     }
                     case MotionEvent.ACTION_UP:
@@ -446,15 +492,119 @@ public class OverlayService extends Service {
                             ui.removeCallbacks(longPressCallback);
                             longPressCallback = null;
                         }
-                        bubble.onRelease();
-                        bubble.setAlpha(0.82f);
-                        bubble.cancelLongPressAnim();
-                        if (!moved && !longPressHandled) onBubbleTap();
+                        bv.onRelease();
+                        bv.setAlpha(0.82f);
+                        bv.cancelLongPressAnim();
+                        /*
+                         * CANCEL приходит при снятии окна изнутри — тапом
+                         * он не считается. Тап — это UP без сдвига и без
+                         * сработавшего зажатия.
+                         */
+                        if (e.getActionMasked() == MotionEvent.ACTION_UP
+                                && !moved && !longPressHandled) {
+                            handleTap(bv);
+                        }
                         return true;
                 }
                 return false;
             }
         });
+    }
+
+    /**
+     * Отложенный одиночный тап (поле сервиса: handleTap() работает с ним
+     * из метода, а не из слушателя). Пока колбэк висит в очереди, быстрый
+     * второй тап отменяет его и превращает пару в двойной тап.
+     */
+    private Runnable pendingSingleTap;
+
+    /**
+     * Тап по шарику с учётом двойного.
+     *
+     * ОДИНОЧНЫЙ тап (после окна подтверждения) — скопировать накопленное
+     * и продолжить чтение. ДВОЙНОЙ — завершить чтение и открыть экран
+     * результата. Так закрытие плавающего окна требует двух тапов и не
+     * достаётся одним случайным касанием.
+     */
+    private void handleTap(final ScanBubbleView bv) {
+        if (pendingSingleTap != null) {
+            // Второй тап в окне подтверждения → двойной тап.
+            ui.removeCallbacks(pendingSingleTap);
+            pendingSingleTap = null;
+            finalizeScan();
+            return;
+        }
+        pendingSingleTap = () -> {
+            pendingSingleTap = null;
+            // Шарик мог быть снят за окно ожидания — тогда копировать некому.
+            if (bv == bubble) onBubbleTap();
+        };
+        ui.postDelayed(pendingSingleTap, TAP_CONFIRM_MS);
+    }
+
+    /**
+     * Двойной тап: закончить чтение и показать результат.
+     *
+     * Накопленное не выбрасывается: строки уходят на экран результата, где
+     * их можно поправить, вычеркнуть, перевести и скопировать. Это тот
+     * экран, который MainActivity обещает текстом, но который раньше
+     * не открывался ниоткуда.
+     */
+    private void finalizeScan() {
+        if (!scanning) return;
+        int lines = acc.keptSize();
+        if (lines > 0) {
+            vibrate(false);
+            ResultActivity.pending = snapshotAcc();
+            // Экран результата теперь держит текст; автокопия в
+            // stopEverything() для этого пути не нужна и не сработает.
+            acc.clear();
+        } else {
+            Toast.makeText(this, "Прочитанного текста не было",
+                    Toast.LENGTH_SHORT).show();
+        }
+        if (bubble != null) {
+            bubble.pop(() -> {
+                stopEverything();
+                openResult();
+            });
+        } else {
+            stopEverything();
+            openResult();
+        }
+    }
+
+    /** Экран результата поверх текущего приложения. */
+    private void openResult() {
+        if (ResultActivity.pending == null) return;
+        Intent i = new Intent(this, ResultActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(i);
+    }
+
+    /**
+     * Замороженная копия накопителя для экрана результата. Копия, а не
+     * ссылка: открытие результата из уведомления не должно связывать экран
+     * с живым накопителем, в который poll() продолжает добавлять строки.
+     */
+    private TextAccumulator snapshotAcc() {
+        TextAccumulator copy = new TextAccumulator();
+        copy.addAll(acc.lines());
+        return copy;
+    }
+
+    /**
+     * Долгое нажатие: убрать плавающее окно БЕЗ экрана результата.
+     *
+     * И здесь накопленное не теряется — уходит в буфер обмена с тостом:
+     * текст не должен пропасть ни на одном пути выхода.
+     */
+    private void removeSilently() {
+        if (scanning && acc.size() > 0) {
+            copyToClipboard();
+            acc.clear();
+        }
+        stopEverything();
     }
 
     /** Тап по шарику: копировать накопленный текст + продолжить чтение. */
@@ -536,6 +686,16 @@ public class OverlayService extends Service {
     }
 
     private void stopEverything() {
+        /*
+         * Неявный конец сессии (таймаут тишины, выход на лаунчер, кнопка
+         * «Прекратить») раньше просто выбрасывал накопленное — получалось
+         * «прочитал, а скопировалось не всё». Теперь любой путь выхода
+         * кладёт остаток в буфер обмена.
+         */
+        if (scanning && acc.size() > 0) {
+            copyToClipboard();
+            acc.clear();
+        }
         scanning = false;
         scanningPackage = null;
         ui.removeCallbacks(poll);
@@ -554,16 +714,22 @@ public class OverlayService extends Service {
     /** Проверить, является ли пакет домашним экраном (лаунчером). */
     private boolean isLauncherPackage(String pkg) {
         if (pkg == null) return false;
-        Intent home = new Intent(Intent.ACTION_MAIN)
-                .addCategory(Intent.CATEGORY_HOME);
-        android.content.pm.ResolveInfo ri =
-                getPackageManager().resolveActivity(home, 0);
-        return ri != null && ri.activityInfo != null
-                && pkg.equals(ri.activityInfo.packageName);
+        // Кеш: resolveActivity — IPC в PackageManager, poll() звал его
+        // каждые 600 мс. Лаунчер не меняется за сессию.
+        if (cachedLauncherPackage == null) {
+            Intent home = new Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_HOME);
+            android.content.pm.ResolveInfo ri =
+                    getPackageManager().resolveActivity(home, 0);
+            cachedLauncherPackage = (ri != null && ri.activityInfo != null)
+                    ? ri.activityInfo.packageName : "";
+        }
+        return pkg.equals(cachedLauncherPackage);
     }
 
     @Override
     public void onDestroy() {
+        instance = null;
         scanning = false;
         ui.removeCallbacks(poll);
         removeZoneView();
@@ -597,11 +763,24 @@ public class OverlayService extends Service {
         PendingIntent pi = PendingIntent.getService(this, 1, stop,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
+        /*
+         * Тап по самому уведомлению раньше ничего не делал — у него не было
+         * contentIntent. Теперь: есть накопленный текст → экран результата
+         * (снапшот, сервис продолжает читать), нет → настройки приложения.
+         */
+        Intent content = (acc.size() > 0)
+                ? new Intent(this, ResultActivity.class)
+                : new Intent(this, MainActivity.class);
+        content.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        PendingIntent contentPi = PendingIntent.getActivity(this, 2, content,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
         return new Notification.Builder(this, CHANNEL)
                 .setContentTitle("Чтение с экрана")
                 .setContentText(text)
                 .setSmallIcon(R.drawable.ic_tile)
                 .setOngoing(true)
+                .setContentIntent(contentPi)
                 .addAction(new Notification.Action.Builder(
                         (android.graphics.drawable.Icon) null, "Прекратить", pi).build())
                 .build();

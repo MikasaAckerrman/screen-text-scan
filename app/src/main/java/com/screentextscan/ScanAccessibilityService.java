@@ -101,9 +101,19 @@ public class ScanAccessibilityService extends AccessibilityService {
         List<Line> out = new ArrayList<>();
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return out;
+        visitedNodes = 0;
         collect(root, zone, screenW, screenH, includeDesc, out, 0);
         return out;
     }
+
+    /**
+     * Потолок числа узлов на один обход. Обычный экран — единицы тысяч
+     * узлов, но WebView-страница без лимита отдаёт десятки тысяч, и poll()
+     * каждые 600 мс превращался в секундные фризы главного потока. 4000 —
+     * с запасом над любым реальным экраном.
+     */
+    private static final int MAX_NODES = 4000;
+    private int visitedNodes;
 
     /**
      * Пакет активного окна. Нужен, чтобы остановить сканирование, когда
@@ -126,10 +136,18 @@ public class ScanAccessibilityService extends AccessibilityService {
                          int screenW, int screenH, boolean includeDesc,
                          List<Line> out, int depth) {
         if (node == null || depth > 60) return;
+        if (++visitedNodes > MAX_NODES) return;
 
         CharSequence cs = node.getText();
         String text = cs == null ? null : cs.toString().trim();
-        if ((text == null || text.isEmpty()) && includeDesc) {
+        /*
+         * contentDescription — только у ЛИСТА без кликабельности: это
+         * alt-текст картинок (подписи постов и фото), который иначе
+         * терялся совсем. У кнопок и панелей desc — служебный шум
+         * («Отправить», «Уведомление»), его пропускаем.
+         */
+        if ((text == null || text.isEmpty()) && includeDesc
+                && node.getChildCount() == 0 && !node.isClickable()) {
             CharSequence d = node.getContentDescription();
             text = d == null ? null : d.toString().trim();
         }

@@ -89,6 +89,7 @@ public class ResultActivity extends Activity {
         super.onCreate(b);
 
         acc = pending;
+        if (acc == null) acc = OverlayService.liveSnapshot();
         if (acc == null || acc.size() == 0) {
             Toast.makeText(this, "Нечего показывать", Toast.LENGTH_SHORT).show();
             finish();
