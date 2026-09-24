@@ -24,8 +24,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
+      # SDK на ubuntu-latest предустановлен (cmdline-tools + платформы).
+      # Раньше здесь стояло android-actions/setup-android@v3, но оно
+      # до-устанавливает устаревший пакет 'tools', который Google удалил
+      # из репозитория в сентябре 2026 — шаг падал с «Failed to find
+      # package 'tools'». Предустановленного SDK сборке достаточно,
+      # лицензии принимаем явно на случай свежей VM.
+      - name: Android SDK лицензии
+        run: |
+          SDKM=$(ls /usr/local/lib/android/sdk/cmdline-tools/*/bin/sdkmanager | head -1)
+          yes | "$SDKM" --licenses > /dev/null || true
 
       # Gradle ставим действием, а не wrapper'ом: gradle-wrapper.jar —
       # бинарник, и держать его в репозитории ради одной сборки незачем.
