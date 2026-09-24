@@ -48,6 +48,7 @@ public class ScanAccessibilityService extends AccessibilityService {
     @Override
     public boolean onUnbind(android.content.Intent intent) {
         instance = null;
+        android.util.Log.d("ScreenTextScan", "a11y onUnbind (система отвязала службу)");
         return super.onUnbind(intent);
     }
 
@@ -99,11 +100,56 @@ public class ScanAccessibilityService extends AccessibilityService {
      */
     public List<Line> readScreen(Rect zone, int screenW, int screenH, boolean includeDesc) {
         List<Line> out = new ArrayList<>();
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = readableRoot();
         if (root == null) return out;
         visitedNodes = 0;
         collect(root, zone, screenW, screenH, includeDesc, out, 0);
         return out;
+    }
+
+    /**
+     * Корень окна, из которого нужно читать.
+     *
+     * РАНЬШЕ был только getRootInActiveWindow() — и это источник бага
+     * «прочитал один экран и замолчал»: активным становится окно, которым
+     * пользователь коснулся ПОСЛЕДНИМ. Тап по шарику — и «активное окно»
+     * уже наш оверлей: poll честно обходил собственное пустое дерево, и
+     * чтение стояло, пока пользователь снова не коснётся приложения.
+     *
+     * Теперь: активное окно не нашего пакета — читаем его (как раньше);
+     * наше или отсутствует — спускаемся по getWindows() до первого чужого
+     * видимого окна: это и есть приложение ПОД нашими оверлеями. В
+     * запасном пути пропускаем клавиатуру и SystemUI: статус-бар всегда
+     * сверху и иначе воровал бы выбор; открытая шторка ловится первым
+     * путём — она активна, пока ею пользуются.
+     */
+    private AccessibilityNodeInfo readableRoot() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null) {
+            CharSequence p = root.getPackageName();
+            if (p == null || !p.toString().equals(getPackageName())) return root;
+        }
+        List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
+        if (ws != null) {
+            // Проход 1: активные/фокусированные чужие окна — не зависят от
+            // порядка списка. Проход 2: верхнее чужое окно по z-порядку.
+            for (int pass = 0; pass < 2; pass++) {
+                for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
+                    if (w == null) continue;
+                    if (pass == 0 && !(w.isActive() || w.isFocused())) continue;
+                    int t = w.getType();
+                    if (t == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue;
+                    if (!w.isVisibleToUser()) continue;
+                    AccessibilityNodeInfo r = w.getRoot();
+                    if (r == null) continue;
+                    CharSequence p = r.getPackageName();
+                    if (p == null || p.toString().equals(getPackageName())) continue;
+                    if ("com.android.systemui".contentEquals(p)) continue;
+                    return r;
+                }
+            }
+        }
+        return root; // может быть null — окно ещё не готово, ждём
     }
 
     /**
@@ -116,12 +162,12 @@ public class ScanAccessibilityService extends AccessibilityService {
     private int visitedNodes;
 
     /**
-     * Пакет активного окна. Нужен, чтобы остановить сканирование, когда
-     * пользователь покинул приложение — иначе poll продолжит читать
+     * Пакет окна, из которого читаем. Нужен, чтобы остановить сканирование,
+     * когда пользователь покинул приложение — иначе poll продолжит читать
      * домашний экран и соберёт все иконки и виджеты.
      */
     public String getActiveWindowPackage() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = readableRoot();
         if (root == null) return null;
         CharSequence pkg = root.getPackageName();
         return pkg == null ? null : pkg.toString();

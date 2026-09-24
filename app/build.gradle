@@ -31,7 +31,7 @@ android {
         // База защищает от downgrade даже если workflow когда-нибудь
         // пересоздадут и GITHUB_RUN_NUMBER снова начнётся с единицы.
         versionCode 10_000 + (ciRunNumber ? ciRunNumber.toInteger() : 0)
-        versionName '1.4'
+        versionName '1.5'
     }
 
     signingConfigs {

@@ -326,38 +326,56 @@ public class OverlayService extends Service {
         scanningPackage = null;
         showBubble();
         updateNotification("Читаю. Листайте текст. Тап=копировать, двойной=результат.");
-        ui.postDelayed(poll, POLL_MS);
+        startPolling();
     }
 
-    private final Runnable poll = new Runnable() {
-        @Override
-        public void run() {
-            if (!scanning) return;
-            ScanAccessibilityService svc = ScanAccessibilityService.get();
-            if (svc != null) {
-                String currentPkg = svc.getActiveWindowPackage();
+    /* ================================================================
+       Опрос экрана
+       ================================================================ */
 
-                if (currentPkg == null) {
-                    // Служба ещё не подключилась — ждём, не останавливаем.
-                } else if ("com.screentextscan".equals(currentPkg)) {
-                    // Наш overlay — не считаем сменой окна.
-                } else if (isLauncherPackage(currentPkg)) {
-                    // Пользователь вышел на главный экран — убрать шарик.
-                    stopEverything();
-                    return;
-                } else {
-                    if (scanningPackage == null) {
-                        scanningPackage = currentPkg;
-                    } else if (!scanningPackage.equals(currentPkg)) {
-                        // Пакет сменился — копируем накопленное и продолжаем.
-                        if (acc.size() > 0) {
-                            copyToClipboard();
-                            acc.clear();
-                        }
-                        scanningPackage = currentPkg;
-                    }
-                }
+    /**
+     * Поколение скана. Инкремент при остановке: результаты, которые
+     * фоновый поток ещё несёт в главный, отбрасываются по номеру.
+     */
+    private volatile int scanGeneration = 0;
 
+    /**
+     * Один поток для тяжёлой работы. Обход дерева на 4000 узлов стоит
+     * 50–200 мс; раньше он шёл на главном потоке — как и запись файла при
+     * копировании — и стопорил касания и анимации: «лагает, когда
+     * перетаскиваешь и когда нажимаешь». Binder-чтения узлов доступности
+     * потокобезопасны; накопитель и окна трогаем только из главного.
+     */
+    private final java.util.concurrent.ExecutorService scanThread =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "sts-scan");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** Следующий опрос: пауза POLL_MS, потом тяжёлая работа в фоне. */
+    private void schedulePoll(final int gen) {
+        if (!scanning || gen != scanGeneration) return;
+        ui.postDelayed(() -> scanThread.execute(() -> pollBody(gen)), POLL_MS);
+    }
+
+    /** Первый опрос цикла чтения (после выбора зоны). */
+    private void startPolling() {
+        schedulePoll(++scanGeneration);
+    }
+
+    /**
+     * Тело опроса — в фоновом потоке: читает окно и собирает строки.
+     * Решения и накопление — в applyPoll на главном потоке.
+     */
+    private void pollBody(final int gen) {
+        if (!scanning || gen != scanGeneration) return;
+        String activePkg = null;
+        List<String> texts = null;
+        ScanAccessibilityService svc = ScanAccessibilityService.get();
+        if (svc != null) {
+            activePkg = svc.getActiveWindowPackage();
+            if (activePkg != null) {
                 List<ScanAccessibilityService.Line> lines =
                         svc.readScreen(zone, screenW, screenH, true);
                 /*
@@ -366,14 +384,50 @@ public class OverlayService extends Service {
                  * строки копировались бы вперемешку. ReadingOrder.sort
                  * раскладывает их по строкам-полосам сверху вниз, слева
                  * направо, а виртуальные (WebView, координаты от начала
-                 * документа) выносит отдельной группой в конец, чтобы они не
-                 * перемешались с экранными.
+                 * документа) выносит отдельной группой в конец, чтобы они
+                 * не перемешались с экранными.
                  */
                 List<ReadingOrder.Item> items = new ArrayList<>(lines.size());
                 for (ScanAccessibilityService.Line l : lines) {
                     items.add(new ReadingOrder.Item(l.text, l.bounds, l.virtual));
                 }
-                List<String> texts = ReadingOrder.sort(items);
+                texts = ReadingOrder.sort(items);
+            }
+        }
+        final String pkg = activePkg;
+        final List<String> sorted = texts;
+        android.util.Log.d("ScreenTextScan",
+                "poll: pkg=" + (pkg == null ? "none" : pkg)
+                        + " lines=" + (sorted == null ? 0 : sorted.size())
+                        + " acc=" + acc.size());
+        ui.post(() -> applyPoll(gen, pkg, sorted));
+    }
+
+    /** Применение результатов опроса — в главном потоке. */
+    private void applyPoll(final int gen, String currentPkg, List<String> texts) {
+        if (!scanning || gen != scanGeneration) return;
+
+        if (currentPkg == null) {
+            // Служба ещё не подключилась — ждём, не останавливаем.
+        } else if ("com.screentextscan".equals(currentPkg)) {
+            // Свои оверлеи — не считаем сменой окна. (readableRoot уже
+            // подменяет их окном приложения под ними, ветка — страховка.)
+        } else if (isLauncherPackage(currentPkg)) {
+            // Пользователь вышел на главный экран — убрать шарик.
+            stopEverything();
+            return;
+        } else {
+            if (scanningPackage == null) {
+                scanningPackage = currentPkg;
+            } else if (!scanningPackage.equals(currentPkg)) {
+                // Пакет сменился — копируем накопленное и продолжаем.
+                if (acc.size() > 0) {
+                    copyToClipboard();
+                    acc.clear();
+                }
+                scanningPackage = currentPkg;
+            }
+            if (texts != null && !texts.isEmpty()) {
                 int added = acc.addAll(texts);
                 if (added > 0) {
                     lastNewAt = System.currentTimeMillis();
@@ -381,28 +435,28 @@ public class OverlayService extends Service {
                     if (bubble != null) bubble.pulseNewText();
                 }
             }
-
-            long idle = System.currentTimeMillis() - lastNewAt;
-            /*
-             * Кольцо на кнопке: пустое сразу после нового текста, полное —
-             * когда с видимого участка больше нечего брать. Это и есть
-             * ответ на «есть ли индикатор, что всё скопировалось»: знать про
-             * ещё не показанный текст индикатор не может, а про видимый —
-             * может и показывает честно.
-             */
-            float readiness = Math.min(1f, (float) idle / COMPLETE_AFTER_MS);
-            if (bubble != null) {
-                bubble.setCount(acc.size());
-                bubble.setReadiness(readiness, idle >= COMPLETE_AFTER_MS && acc.size() > 0);
-            }
-
-            if (idle > IDLE_LIMIT_MS) {
-                stopEverything();
-                return;
-            }
-            ui.postDelayed(this, POLL_MS);
         }
-    };
+
+        long idle = System.currentTimeMillis() - lastNewAt;
+        /*
+         * Кольцо на кнопке: пустое сразу после нового текста, полное —
+         * когда с видимого участка больше нечего брать. Это и есть
+         * ответ на «есть ли индикатор, что всё скопировалось»: знать про
+         * ещё не показанный текст индикатор не может, а про видимый —
+         * может и показывает честно.
+         */
+        float readiness = Math.min(1f, (float) idle / COMPLETE_AFTER_MS);
+        if (bubble != null) {
+            bubble.setCount(acc.size());
+            bubble.setReadiness(readiness, idle >= COMPLETE_AFTER_MS && acc.size() > 0);
+        }
+
+        if (idle > IDLE_LIMIT_MS) {
+            stopEverything();
+            return;
+        }
+        schedulePoll(gen);
+    }
 
     private void showBubble() {
         /*
@@ -691,14 +745,17 @@ public class OverlayService extends Service {
      * Не останавливает скан — пользователь может продолжить чтение.
      */
     private void copyToClipboard() {
-        saveToFile();
-        String text = acc.text();
+        final String text = acc.text();
+        final int kept = acc.keptSize();
+        // Диск — в фон: запись файла на главном потоке стопорила
+        // интерфейс («лагает, когда нажимаешь»).
+        scanThread.execute(() -> saveToFile(text));
         android.content.ClipboardManager cm =
                 (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         cm.setPrimaryClip(android.content.ClipData.newPlainText(
                 "ScreenTextScan", text));
         Toast.makeText(this,
-                "Скопировано: " + acc.keptSize() + " " + lineWord(acc.keptSize()),
+                "Скопировано: " + kept + " " + lineWord(kept),
                 Toast.LENGTH_SHORT).show();
     }
 
@@ -732,14 +789,19 @@ public class OverlayService extends Service {
      * Дублируем результат в файл. Буфер обмена недолговечен: одно
      * копирование в другом приложении и текст потерян.
      */
-    private void saveToFile() {
+    /**
+     * Запись накопленного в файл — вызывается в фоновом потоке.
+     * Текст передаётся готовым: накопитель живёт на главном потоке, и
+     * читать его из фона нельзя.
+     */
+    private void saveToFile(String text) {
         try {
             java.io.File dir = getExternalFilesDir(null);
             if (dir == null) return;
             java.io.File f = new java.io.File(dir, "screen-text.txt");
             try (java.io.OutputStreamWriter w = new java.io.OutputStreamWriter(
                     new java.io.FileOutputStream(f), "UTF-8")) {
-                w.write(acc.text());
+                w.write(text);
             }
         } catch (java.io.IOException ignored) {
         }
@@ -758,7 +820,9 @@ public class OverlayService extends Service {
         }
         scanning = false;
         scanningPackage = null;
-        ui.removeCallbacks(poll);
+        // Поколение++: летящие из фонового потока результаты старого
+        // скана отбрасываются, новый цикл начнётся со своего номера.
+        scanGeneration++;
         removeZoneView();
         removeBubbleViews();
         stopForeground(STOP_FOREGROUND_REMOVE);
@@ -785,7 +849,8 @@ public class OverlayService extends Service {
     public void onDestroy() {
         instance = null;
         scanning = false;
-        ui.removeCallbacks(poll);
+        scanGeneration++;
+        scanThread.shutdown();
         removeZoneView();
         removeBubbleViews();
         super.onDestroy();
