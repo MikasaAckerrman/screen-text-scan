@@ -85,6 +85,15 @@ public class OverlayService extends Service {
     private ZoneSelectorView zoneView;
     private ScanBubbleView bubble;
     private WindowManager.LayoutParams bubbleParams;
+    /**
+     * Окно касаний шарика. Маленькое, ровно под кнопку — база как у
+     * copy as file. Раньше касания ловило окно эффектов 200dp: весь этот
+     * квадрат перехватывал скролл приложения (текст «не обновлялся при
+     * прокрутке»), а перетаскивание упиралось в кромку экрана на
+     * полквадрата раньше края.
+     */
+    private View bubbleTouch;
+    private WindowManager.LayoutParams touchParams;
 
     private Rect zone;
     private boolean scanning;
@@ -208,6 +217,16 @@ public class OverlayService extends Service {
                     Math.round(bubbleParams.y * (float) screenH / oldH),
                     0, Math.max(0, screenH - bubbleParams.height));
             wm.updateViewLayout(bubble, bubbleParams);
+            // Окно касаний следует за окном эффектов: круг один и тот же.
+            if (bubbleTouch != null && touchParams != null) {
+                int off = (bubbleParams.width - touchParams.width) / 2;
+                touchParams.x = bubbleParams.x + off;
+                touchParams.y = bubbleParams.y + off;
+                try {
+                    wm.updateViewLayout(bubbleTouch, touchParams);
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
         }
     }
 
@@ -386,16 +405,30 @@ public class OverlayService extends Service {
     };
 
     private void showBubble() {
+        /*
+         * ДВА ОКНА вместо одного большого.
+         *
+         * Раньше круг 62dp жил в окне 200dp, которое нужно для искр и
+         * burst, — и весь квадрат был хитбоксом: свайп, начатый рядом с
+         * шариком, до приложения не доходил (экран не прокручивался —
+         * опрос не видел нового текста), а шарик нельзя было подтащить
+         * к краю: клэмп был по размеру окна эффектов.
+         *
+         * База как у copy as file: касания ловит ТОЛЬКО окно-кнопка;
+         * эффекты живут отдельным окном с FLAG_NOT_TOUCHABLE — картинку
+         * рисует, касаний не забирает. Оба окна двигаются синхронно.
+         */
         bubble = new ScanBubbleView(this);
         bubble.setCount(0);
 
-        // View = 200dp — чтобы искры и burst помещались полностью.
-        // Рисуемый круг = 62dp по центру View.
+        // Окно эффектов: 200dp, круг 62dp в центре, искры и burst целиком.
         int viewSize = dp(200);
         bubbleParams = new WindowManager.LayoutParams(
                 viewSize, viewSize,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         bubbleParams.gravity = Gravity.TOP | Gravity.START;
         // Сдвигаем так, чтобы круг 62dp был у правого края как раньше
@@ -404,6 +437,23 @@ public class OverlayService extends Service {
         bubbleParams.y = screenH * 2 / 3 - (viewSize - circleSize) / 2;
         bubble.setAlpha(0.82f);
         wm.addView(bubble, bubbleParams);
+
+        // Окно касаний: сама кнопка с небольшим запасом на палец.
+        // FLAG_NOT_FOCUSABLE (как у copy as file) включает не-модальность:
+        // мимо этого окна касания сразу уходят в приложение под ним.
+        int touchSize = dp(70);
+        bubbleTouch = new View(this);
+        touchParams = new WindowManager.LayoutParams(
+                touchSize, touchSize,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT);
+        touchParams.gravity = Gravity.TOP | Gravity.START;
+        int off = (viewSize - touchSize) / 2;
+        touchParams.x = bubbleParams.x + off;
+        touchParams.y = bubbleParams.y + off;
+        wm.addView(bubbleTouch, touchParams);
         attachDragAndTap();
     }
 
@@ -416,55 +466,42 @@ public class OverlayService extends Service {
      */
     private void attachDragAndTap() {
         final int slop = dp(12);
-        bubble.setOnTouchListener(new View.OnTouchListener() {
+        // Визуал эффекта, захваченный на момент установки слушателя:
+        // сравнение с полем bubble — проверка живости (жест может
+        // до-летать к уже снятым окнам, поле к этому моменту null).
+        final ScanBubbleView fx = bubble;
+        bubbleTouch.setOnTouchListener(new View.OnTouchListener() {
             float startX, startY;
-            int origX, origY;
+            int origFxX, origFxY, origTx, origTy;
             boolean moved;
             boolean longPressHandled;
             Runnable longPressCallback;
 
             @Override
             public boolean onTouch(View v, MotionEvent e) {
-                /*
-                 * КРАШ 24.09 (OverlayService$3.onTouch:437, NPE на null
-                 * поле bubble). Слушатель обязан работать с ЛОКАЛЬНОЙ
-                 * ссылкой на сам view, а не с полем сервиса: poll() и
-                 * stopEverything() снимают шарик и обнуляют поле ВО ВРЕМЯ
-                 * жеста, а система до-доставляет отсоединённому view
-                 * оставшиеся ACTION_MOVE/UP/CANCEL. Обращение к полю на
-                 * этом пути падало на null и убивало весь процесс — вместе
-                 * со службой доступности, которую система после краша
-                 * помечает «работает некорректно».
-                 */
-                final ScanBubbleView bv = (ScanBubbleView) v;
-                // Проверяем, что касание в пределах круга (не в пустой области View)
-                float dxFromCenter = e.getX() - v.getWidth() / 2f;
-                float dyFromCenter = e.getY() - v.getHeight() / 2f;
-                float distFromCenter = (float) Math.sqrt(dxFromCenter * dxFromCenter + dyFromCenter * dyFromCenter);
-                boolean inCircle = distFromCenter <= dp(31);
-
+                final boolean live = (fx == bubble && bubbleTouch == v);
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        if (!inCircle) return false; // касание мимо круга → пропустить
                         startX = e.getRawX();
                         startY = e.getRawY();
-                        origX = bubbleParams.x;
-                        origY = bubbleParams.y;
+                        origFxX = bubbleParams.x;
+                        origFxY = bubbleParams.y;
+                        origTx = touchParams.x;
+                        origTy = touchParams.y;
                         moved = false;
                         longPressHandled = false;
-                        bv.onPress();
-                        bv.setAlpha(1f);
-                        // Всегда запускаем таймер 2.5с → убрать шарик
-                        bv.startLongPressAnim();
+                        if (live) {
+                            fx.onPress();
+                            fx.setAlpha(1f);
+                            // Всегда запускаем таймер 2.5с → убрать шарик
+                            fx.startLongPressAnim();
+                        }
                         longPressCallback = () -> {
-                            // bv == bubble: жест принадлежит ЖИВОМУ шарику.
-                            // Если шарик уже снят или заменён — просто ничего
-                            // не делаем, окно всё равно уходит.
-                            if (bv == bubble && scanning) {
+                            if (fx == bubble && bubbleTouch == v) {
                                 longPressHandled = true;
-                                bv.cancelLongPressAnim();
+                                fx.cancelLongPressAnim();
                                 vibrate(true);
-                                bv.pop(() -> removeSilently());
+                                fx.pop(() -> removeSilently());
                             }
                         };
                         ui.postDelayed(longPressCallback, 2500);
@@ -472,18 +509,39 @@ public class OverlayService extends Service {
                     case MotionEvent.ACTION_MOVE: {
                         int dx = (int) (e.getRawX() - startX);
                         int dy = (int) (e.getRawY() - startY);
-                        if (Math.abs(dx) > slop || Math.abs(dy) > slop) moved = true;
-                        // Перетаскивание НЕ отменяет таймер зажатия —
-                        // пользователь может двигать шарик и одновременно
-                        // держать для удаления.
-                        bubbleParams.x = ZoneGeometry.clamp(origX + dx, 0,
-                                Math.max(0, screenW - bv.getWidth()));
-                        bubbleParams.y = ZoneGeometry.clamp(origY + dy, 0,
-                                Math.max(0, screenH - bv.getHeight()));
-                        // updateViewLayout на снятое окно бросает
-                        // IllegalArgumentException — если жест долетел уже
-                        // после удаления шарика, двигать нечего.
-                        if (bubble == bv) wm.updateViewLayout(bv, bubbleParams);
+                        /*
+                         * Движение ОТМЕНЯЕТ таймер зажатия. Раньше он не
+                         * отменялся, и «нажал и повёл» убивало шарик через
+                         * 2,5 с посреди перетаскивания.
+                         */
+                        if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) {
+                            moved = true;
+                            if (longPressCallback != null) {
+                                ui.removeCallbacks(longPressCallback);
+                                longPressCallback = null;
+                            }
+                            if (live) fx.cancelLongPressAnim();
+                        }
+                        if (!moved || !live) return true;
+                        // Окно касаний клэмпим по экрану (как copy as file);
+                        // окно эффектов держим так, чтобы круг оставался
+                        // в центре окна касаний — оно с NO_LIMITS, может
+                        // выходить за край, так что шарик теперь доезжает
+                        // до самой кромки.
+                        int ts = v.getWidth();
+                        touchParams.x = ZoneGeometry.clamp(origTx + dx, 0,
+                                Math.max(0, screenW - ts));
+                        touchParams.y = ZoneGeometry.clamp(origTy + dy, 0,
+                                Math.max(0, screenH - ts));
+                        int off = (bubbleParams.width - ts) / 2;
+                        bubbleParams.x = touchParams.x - off;
+                        bubbleParams.y = touchParams.y - off;
+                        try {
+                            wm.updateViewLayout(bubbleTouch, touchParams);
+                            wm.updateViewLayout(bubble, bubbleParams);
+                        } catch (IllegalArgumentException ignored) {
+                            // Жест долетел до уже снятых окон — не двигаем.
+                        }
                         return true;
                     }
                     case MotionEvent.ACTION_UP:
@@ -492,17 +550,19 @@ public class OverlayService extends Service {
                             ui.removeCallbacks(longPressCallback);
                             longPressCallback = null;
                         }
-                        bv.onRelease();
-                        bv.setAlpha(0.82f);
-                        bv.cancelLongPressAnim();
+                        if (live) {
+                            fx.onRelease();
+                            fx.setAlpha(0.82f);
+                            fx.cancelLongPressAnim();
+                        }
                         /*
                          * CANCEL приходит при снятии окна изнутри — тапом
                          * он не считается. Тап — это UP без сдвига и без
                          * сработавшего зажатия.
                          */
                         if (e.getActionMasked() == MotionEvent.ACTION_UP
-                                && !moved && !longPressHandled) {
-                            handleTap(bv);
+                                && !moved && !longPressHandled && live) {
+                            handleTap(fx);
                         }
                         return true;
                 }
@@ -700,13 +760,7 @@ public class OverlayService extends Service {
         scanningPackage = null;
         ui.removeCallbacks(poll);
         removeZoneView();
-        if (bubble != null) {
-            try {
-                wm.removeView(bubble);
-            } catch (IllegalArgumentException ignored) {
-            }
-            bubble = null;
-        }
+        removeBubbleViews();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
@@ -733,6 +787,16 @@ public class OverlayService extends Service {
         scanning = false;
         ui.removeCallbacks(poll);
         removeZoneView();
+        removeBubbleViews();
+        super.onDestroy();
+    }
+
+    /**
+     * Снять оба окна шарика: окно эффектов и окно касаний. try/catch —
+     * окно могли снять раньше (или жест ещё держит его): падать на этом
+     * нельзя.
+     */
+    private void removeBubbleViews() {
         if (bubble != null) {
             try {
                 wm.removeView(bubble);
@@ -740,7 +804,13 @@ public class OverlayService extends Service {
             }
             bubble = null;
         }
-        super.onDestroy();
+        if (bubbleTouch != null) {
+            try {
+                wm.removeView(bubbleTouch);
+            } catch (IllegalArgumentException ignored) {
+            }
+            bubbleTouch = null;
+        }
     }
 
     /* ==================================================================
