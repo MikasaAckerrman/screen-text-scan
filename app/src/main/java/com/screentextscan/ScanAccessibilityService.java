@@ -139,7 +139,6 @@ public class ScanAccessibilityService extends AccessibilityService {
                     if (pass == 0 && !(w.isActive() || w.isFocused())) continue;
                     int t = w.getType();
                     if (t == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue;
-                    if (!w.isVisibleToUser()) continue;
                     AccessibilityNodeInfo r = w.getRoot();
                     if (r == null) continue;
                     CharSequence p = r.getPackageName();
