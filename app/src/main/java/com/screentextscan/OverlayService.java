@@ -306,7 +306,7 @@ public class OverlayService extends Service {
         lastNewAt = System.currentTimeMillis();
         scanningPackage = null;
         showBubble();
-        updateNotification("Читаю. Листайте текст. Тап=копировать.");
+        updateNotification("Читаю. Листайте текст. Тап=копировать, двойной=результат.");
         ui.postDelayed(poll, POLL_MS);
     }
 
