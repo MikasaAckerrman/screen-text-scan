@@ -144,13 +144,14 @@ public class ScanAccessibilityService extends AccessibilityService {
     /**
      * Перечитать узел ИЗ ИСТОЧНИКА, в обход кэша.
      *
-     * refresh(true) (bypassCache) доступен с API 18; безаргументный
-     * refresh() появился только в API 28 и не гарантирует обхода кэша.
+     * refresh() появился в API 28 (на SDK 34 вариант с аргументом
+     * удалён); до 28 остаёмся на кэше — таких устройств у приложения нет.
      * Возвращает false, если узел исчез (элемент списка переработан).
      */
     private static boolean refreshFromSource(AccessibilityNodeInfo node) {
+        if (Build.VERSION.SDK_INT < 28) return true;
         try {
-            return node.refresh(true);
+            return node.refresh();
         } catch (RuntimeException ignored) {
             return false;
         }
