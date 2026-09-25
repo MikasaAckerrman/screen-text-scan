@@ -75,7 +75,7 @@ public class ScanAccessibilityService extends AccessibilityService {
 
     private static void applySubscription(ScanAccessibilityService s, boolean full) {
         try {
-            android.view.accessibility.AccessibilityServiceInfo info = s.getServiceInfo();
+            android.accessibilityservice.AccessibilityServiceInfo info = s.getServiceInfo();
             if (info == null) return;
             info.eventTypes = full
                     ? (AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
