@@ -52,6 +52,13 @@ public class OverlayService extends Service {
      * -n com.screentextscan/.OverlayService -a com.screentextscan.PROBE
      */
     public static final String ACTION_PROBE = "com.screentextscan.PROBE";
+    /**
+     * Диагностический СКАН для adb: полный poll-цикл без интерфейса.
+     * Никаких оверлеев — только накопление и лог каждые 600 мс.
+     * Параметр `zone`: "null" (по умолчанию — весь экран) или "saved"
+     * (сохранённая рамка). Остановка: ACTION_STOP_ALL.
+     */
+    public static final String ACTION_SCAN_QUIET = "com.screentextscan.SCAN_QUIET";
 
     private static final String CHANNEL = "sts_scan";
     private static final int NOTIF_ID = 41;
@@ -76,14 +83,6 @@ public class OverlayService extends Service {
      * Именно страховка: обычный способ закончить — нажать кнопку.
      */
     private static final long IDLE_LIMIT_MS = 180_000;
-
-    /**
-     * Окно подтверждения одиночного тапа. Копирование по тапу срабатывает
-     * не мгновенно, а после этого окна: если второй тап пришёл быстрее —
-     * это двойной тап, то есть завершение чтения. Двойной тап и делает
-     * закрытие плавающего окна недоступным одному случайному касанию.
-     */
-    private static final long TAP_CONFIRM_MS = 280;
 
     private WindowManager wm;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -187,8 +186,25 @@ public class OverlayService extends Service {
             probe();
             return START_NOT_STICKY;
         }
+        if (ACTION_SCAN_QUIET.equals(action)) {
+            quietScan(intent.getStringExtra("zone"));
+            return START_NOT_STICKY;
+        }
         if (zoneView == null && bubble == null) showZoneSelector();
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Headless-скан для диагностики: poll-цикл без оверлеев. Так видно,
+     * собирает ли скан текст НА САМОМ ДЕЛЕ — без зоны-селектора, шарика
+     * и их влияния на «активное окно».
+     */
+    private void quietScan(String zoneMode) {
+        zone = "saved".equals(zoneMode)
+                ? ZonePrefs.load(this, screenW, screenH) : null;
+        android.util.Log.d("ScreenTextScan",
+                "quietScan: start zone=" + (zone == null ? "null" : zone.toString()));
+        startScanning(false);   // без showBubble() — оверлеев нет
     }
 
     /**
@@ -382,12 +398,19 @@ public class OverlayService extends Service {
        ================================================================== */
 
     private void startScanning() {
+        startScanning(true);
+    }
+
+    /** @param withBubble false — headless-режим для диагностики через adb. */
+    private void startScanning(boolean withBubble) {
         acc.clear();
         scanning = true;
         lastNewAt = System.currentTimeMillis();
         scanningPackage = null;
-        showBubble();
-        updateNotification("Читаю. Листайте текст. Тап=копировать, двойной=результат.");
+        if (withBubble) showBubble();
+        updateNotification(withBubble
+                ? "Читаю. Листайте текст. Зажать=копировать, двойной=закрыть."
+                : "Диагностическое чтение (без интерфейса)");
         startPolling();
     }
 
@@ -696,37 +719,24 @@ public class OverlayService extends Service {
     }
 
     /**
-     * Отложенный одиночный тап (поле сервиса: handleTap() работает с ним
-     * из метода, а не из слушателя). Пока колбэк висит в очереди, быстрый
-     * второй тап отменяет его и превращает пару в двойной тап.
-     */
-    private Runnable pendingSingleTap;
-
-    /**
-     * Тап по шарику с учётом двойного.
+     * Тап по шарику.
      *
-     * ОДИНОЧНЫЙ тап (после окна подтверждения) — скопировать накопленное
-     * и продолжить чтение. ДВОЙНОЙ — завершить чтение и открыть экран
-     * результата. Так закрытие плавающего окна требует двух тапов и не
-     * достаётся одним случайным касанием.
+     * ОДИНОЧНЫЙ тап НИЧЕГО не делает: копирование — только зажатием
+     * (правило пользователя: «только когда зажимаю — копирует»).
+     * ДВОЙНОЙ тап — закрыть плавающее окно.
      */
     private void handleTap(final ScanBubbleView bv) {
-        if (pendingSingleTap != null) {
-            // Второй тап в окне подтверждения → двойной тап: ЗАКРЫТЬ.
-            // Ничего не копируется и ничего не открывается — правило
-            // пользователя: копирование — это зажатие.
-            ui.removeCallbacks(pendingSingleTap);
-            pendingSingleTap = null;
-            closeScan();
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastTapAt < 300) {
+            lastTapAt = 0;
+            if (bv == bubble) closeScan();
             return;
         }
-        pendingSingleTap = () -> {
-            pendingSingleTap = null;
-            // Шарик мог быть снят за окно ожидания — тогда копировать некому.
-            if (bv == bubble) onBubbleTap();
-        };
-        ui.postDelayed(pendingSingleTap, TAP_CONFIRM_MS);
+        lastTapAt = now;
     }
+
+    /** Время последнего одиночного тапа — для распознавания двойного. */
+    private long lastTapAt;
 
     /**
      * Двойной тап: просто закрыть плавающее окно.
@@ -766,25 +776,12 @@ public class OverlayService extends Service {
      */
     private void removeSilently() {
         if (scanning && acc.size() > 0) {
+            if (bubble != null) bubble.flashCopy();
+            vibrate(false);
             copyToClipboard();
             acc.clear();
         }
         stopEverything();
-    }
-
-    /** Тап по шарику: копировать накопленный текст + продолжить чтение. */
-    private void onBubbleTap() {
-        if (scanning && acc.size() > 0) {
-            vibrate(false);
-            bubble.flashCopy();
-            copyToClipboard();
-            // Очищаем аккумулятор — новый текст будет копироваться отдельно.
-            acc.clear();
-            lastNewAt = System.currentTimeMillis();
-        } else if (scanning) {
-            Toast.makeText(this, "Текста пока нет — листайте дальше",
-                    Toast.LENGTH_SHORT).show();
-        }
     }
 
     /* ==================================================================
