@@ -141,10 +141,31 @@ public class ScanAccessibilityService extends AccessibilityService {
      *                   чтения статьи только мусорит, но у картинок с подписью
      *                   это единственный источник текста.
      */
+    /**
+     * Перечитать узел ИЗ ИСТОЧНИКА, в обход кэша.
+     *
+     * refresh(true) (bypassCache) доступен с API 18; безаргументный
+     * refresh() появился только в API 28 и не гарантирует обхода кэша.
+     * Возвращает false, если узел исчез (элемент списка переработан).
+     */
+    private static boolean refreshFromSource(AccessibilityNodeInfo node) {
+        try {
+            return node.refresh(true);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
     public List<Line> readScreen(Rect zone, int screenW, int screenH, boolean includeDesc) {
         List<Line> out = new ArrayList<>();
         AccessibilityNodeInfo root = readableRoot();
         if (root == null) return out;
+        /*
+         * Корень тоже мог закэшироваться вместе со старым снимком окна:
+         * «текст вообще не тот, что на экране» — это именно он. Обновляем
+         * и корень (заодно — его список детей).
+         */
+        if (!refreshFromSource(root)) return out;
         visitedNodes = 0;
         collect(root, zone, screenW, screenH, includeDesc, out, 0);
         return out;
@@ -226,7 +247,27 @@ public class ScanAccessibilityService extends AccessibilityService {
         if (node == null || depth > 60) return;
         if (++visitedNodes > MAX_NODES) return;
 
+        /*
+         * РЕБИНД-ФИКС (корень «прочитал 5 строк и замолчал»). Кэш
+         * доступности инвалидируют события, а не опросы — но у
+         * RecyclerView-списков (чаты, ленты) при прокрутке элементы
+         * ПЕРЕЗАПИСЫВАЮТ ТЕ ЖЕ узлы: id прежние, текст внутри новый.
+         * Кэш честно возвращает старый текст по старым id — опрос
+         * вечно видит первый снимок. Диагностика 25.09: quiet-scan без
+         * оверлеев держал lines=8 одиннадцать опросов подряд.
+         * refresh() перечитывает узел напрямую, в обход кэша; заодно
+         * обновляются видимость (фантомы уехавших узлов) и число детей.
+         */
+        if (node.isScrollable()) refreshFromSource(node);
+
         CharSequence cs = node.getText();
+        if (cs != null && cs.length() > 0) {
+            if (!refreshFromSource(node)) {
+                cs = null;            // узел исчез — перечитывать нечего
+            } else {
+                cs = node.getText();  // актуальный текст мимо кэша
+            }
+        }
         String text = cs == null ? null : cs.toString().trim();
         /*
          * contentDescription — только у ЛИСТА без кликабельности: это
@@ -309,6 +350,9 @@ public class ScanAccessibilityService extends AccessibilityService {
     public Rect autoZone(int screenW, int screenH) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return null;
+        // Снимок для зоны тоже должен быть свежим: подбирать рамку по
+        // закэшированному прошлому экрану — выбирать не то, что видно.
+        refreshFromSource(root);
         Rect best = null;
         long bestArea = 0;
         List<AccessibilityNodeInfo> stack = new ArrayList<>();

@@ -667,7 +667,13 @@ public class OverlayService extends Service {
                                 ui.removeCallbacks(longPressCallback);
                                 longPressCallback = null;
                             }
-                            if (live) fx.cancelLongPressAnim();
+                            /*
+                             * Отменён ТОЛЬКО таймер удаления — а визуал
+                             * зажатия (сжатый круг, сходящиеся частицы)
+                             * продолжает жить, пока палец на экране:
+                             * «при перемещении она перестанет сжиматься»
+                             * было именно из-за отмены всей анимации.
+                             */
                         }
                         if (!moved || !live) return true;
                         // Окно касаний клэмпим по экрану (как copy as file);
