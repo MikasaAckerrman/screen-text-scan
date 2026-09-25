@@ -43,6 +43,49 @@ public class ScanAccessibilityService extends AccessibilityService {
         instance = this;
         android.util.Log.d("ScreenTextScan", "a11y onServiceConnected");
         AccessibilityKeepAliveService.start(this);
+        // Перепривязка сбрасывает подписку к значениям из XML. Если скан
+        // шёл в этот момент — вернуть полную подписку, иначе кэш снова
+        // замёрзнет и poll перечитывает один и тот же снимок.
+        if (wantFullEvents) applySubscription(this, true);
+    }
+
+    /**
+     * Полная подписка на события — на время чтения экрана.
+     *
+     * ЗАЧЕМ. Дерево доступности отдаётся из клиентского кэша, и кэш
+     * инвалидируют СОБЫТИЯ, а не наши опросы. Диагностика 25.09 это
+     * подтвердила: poll при прокрутке чата возвращал «lines=5» двенадцать
+     * раз подряд — статичный снимок момента открытия окна. Подписка
+     * «только смена окна» (XML) кэш при прокрутке не трогает: летят
+     * content-changed и scrolled, которых мы не получали.
+     *
+     * ПОТОМ ОБЯЗАТЕЛЬНО МИНИМАЛЬНАЯ: события content-changed идут из всех
+     * приложений круглосуточно, постоянная подписка зря будила бы процесс
+     * и съедала батарею. setServiceInfo действует сразу; wantFullEvents
+     * хранит желание, чтобы onServiceConnected мог его вернуть.
+     */
+    private static volatile boolean wantFullEvents = false;
+
+    /** Включить/выключить полную подписку (вызывает OverlayService). */
+    public static void setScanSubscription(boolean full) {
+        wantFullEvents = full;
+        ScanAccessibilityService s = instance;
+        if (s != null) applySubscription(s, full);
+    }
+
+    private static void applySubscription(ScanAccessibilityService s, boolean full) {
+        try {
+            android.view.accessibility.AccessibilityServiceInfo info = s.getServiceInfo();
+            if (info == null) return;
+            info.eventTypes = full
+                    ? (AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                        | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                        | AccessibilityEvent.TYPE_VIEW_SCROLLED)
+                    : AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+            s.setServiceInfo(info);
+        } catch (RuntimeException ignored) {
+            // Служба перепривязывается — подписку вернёт onServiceConnected.
+        }
     }
 
     @Override

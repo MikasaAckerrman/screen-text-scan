@@ -361,6 +361,14 @@ public class OverlayService extends Service {
 
     /** Первый опрос цикла чтения (после выбора зоны). */
     private void startPolling() {
+        /*
+         * Полная подписка на события доступности — пока идёт чтение.
+         * Кэш дерева инвалидируют события; без content-changed/scrolled
+         * poll при прокрутке перечитывает один и тот же снимок (данные
+         * 25.09: lines=5 двенадцать опросов подряд). По окончании —
+         * минимальная подписка, чтобы не будить процесс круглосуточно.
+         */
+        ScanAccessibilityService.setScanSubscription(true);
         schedulePoll(++scanGeneration);
     }
 
@@ -823,6 +831,8 @@ public class OverlayService extends Service {
         // Поколение++: летящие из фонового потока результаты старого
         // скана отбрасываются, новый цикл начнётся со своего номера.
         scanGeneration++;
+        // Минимальная подписка: полный поток событий больше не нужен.
+        ScanAccessibilityService.setScanSubscription(false);
         removeZoneView();
         removeBubbleViews();
         stopForeground(STOP_FOREGROUND_REMOVE);
@@ -850,6 +860,7 @@ public class OverlayService extends Service {
         instance = null;
         scanning = false;
         scanGeneration++;
+        ScanAccessibilityService.setScanSubscription(false);
         scanThread.shutdown();
         removeZoneView();
         removeBubbleViews();

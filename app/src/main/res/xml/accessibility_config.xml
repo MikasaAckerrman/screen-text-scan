@@ -9,6 +9,15 @@
   события не обрабатывает (читает по запросу), но система требует хотя бы
   один тип. typeWindowStateChanged — самый редкий из подходящих, значит
   лишних вызовов почти не будет.
+
+  ВАЖНО ПРО КЭШ: дерево доступности отдаётся из клиентского кэша, и кэш
+  инвалидируют СОБЫТИЯ, а не опросы. Подписки «только смена окна» мало:
+  при прокрутке летят content-changed и scrolled — без них poll
+  перечитывает один и тот же снимок. Поэтому OverlayService на время
+  чтения включает полную подписку (ScanAccessibilityService
+  .setScanSubscription(true)), а по окончании возвращает минимальную:
+  события content-changed идут из всех приложений круглосуточно, и
+  постоянная подписка зря будила бы процесс.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged"
