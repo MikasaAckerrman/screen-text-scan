@@ -158,9 +158,10 @@ public class ScanAccessibilityService extends AccessibilityService {
         }
     }
 
-    public List<Line> readScreen(Rect zone, int screenW, int screenH, boolean includeDesc) {
+    public List<Line> readScreen(String targetPkg, Rect zone, int screenW,
+                                 int screenH, boolean includeDesc) {
         List<Line> out = new ArrayList<>();
-        AccessibilityNodeInfo root = readableRoot();
+        AccessibilityNodeInfo root = readableRoot(targetPkg);
         if (root == null) return out;
         /*
          * Корень тоже мог закэшироваться вместе со старым снимком окна:
@@ -189,13 +190,57 @@ public class ScanAccessibilityService extends AccessibilityService {
      * сверху и иначе воровал бы выбор; открытая шторка ловится первым
      * путём — она активна, пока ею пользуются.
      */
-    private AccessibilityNodeInfo readableRoot() {
+    /**
+     * Окно приложения, к которому ПРИВЯЗАН скан.
+     *
+     * Правило пользователя: «текст должен читаться только с того
+     * приложения, в котором я нахожусь» — и только с него. Раньше читали
+     * «активное окно» (окно последнего касания): пользователь прыгает по
+     * приложениям — скан шёл за ним, автокопируя чужой текст на каждом
+     * переходе, и в буфере смешивались несколько приложений.
+     *
+     * Теперь: targetPkg задан (обычный скан) — ищем ЕГО окно: активное →
+     * сфокусированное → крупнейшее окно этого пакета. Пропали окна пакета
+     * (приложение закрыто) — null, poll решает, что делать.
+     *
+     * targetPkg == null (диагностические обходы) — прежнее поведение:
+     * активное окно чужого пакета, иначе верхнее чужое по z-порядку.
+     */
+    private AccessibilityNodeInfo readableRoot(String targetPkg) {
+        List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
+
+        if (targetPkg != null) {
+            AccessibilityNodeInfo fallback = null;
+            long fallbackArea = 0;
+            if (ws != null) {
+                for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
+                    if (w == null) continue;
+                    int t = w.getType();
+                    if (t == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue;
+                    AccessibilityNodeInfo r = w.getRoot();
+                    if (r == null) continue;
+                    CharSequence p = r.getPackageName();
+                    if (p == null || !p.toString().equals(targetPkg)) continue;
+                    if (w.isActive()) return r;
+                    if (fallback == null || w.isFocused()) {
+                        Rect b = new Rect();
+                        w.getBoundsInScreen(b);
+                        long area = (long) b.width() * b.height();
+                        if (w.isFocused() || area > fallbackArea) {
+                            fallback = r;
+                            fallbackArea = area;
+                        }
+                    }
+                }
+            }
+            return fallback;
+        }
+
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root != null) {
             CharSequence p = root.getPackageName();
             if (p == null || !p.toString().equals(getPackageName())) return root;
         }
-        List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
         if (ws != null) {
             // Проход 1: активные/фокусированные чужие окна — не зависят от
             // порядка списка. Проход 2: верхнее чужое окно по z-порядку.
@@ -218,6 +263,23 @@ public class ScanAccessibilityService extends AccessibilityService {
     }
 
     /**
+     * Пакет, в котором пользователь находится СЕЙЧАС — для детекта ухода
+     * из приложения. Свои оверлеи, SystemUI (шторка) и клавиатура «своим»
+     * приложением не считаются: пользователь не покидал приложение.
+     */
+    public String getActiveWindowPackage() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        CharSequence p = root.getPackageName();
+        if (p == null) return null;
+        String s = p.toString();
+        if (s.equals(getPackageName())
+                || s.equals("com.android.systemui")
+                || s.equals("com.android.imf")) return null;
+        return s;
+    }
+
+    /**
      * Потолок числа узлов на один обход. Обычный экран — единицы тысяч
      * узлов, но WebView-страница без лимита отдаёт десятки тысяч, и poll()
      * каждые 600 мс превращался в секундные фризы главного потока. 4000 —
@@ -225,18 +287,6 @@ public class ScanAccessibilityService extends AccessibilityService {
      */
     private static final int MAX_NODES = 4000;
     private int visitedNodes;
-
-    /**
-     * Пакет окна, из которого читаем. Нужен, чтобы остановить сканирование,
-     * когда пользователь покинул приложение — иначе poll продолжит читать
-     * домашний экран и соберёт все иконки и виджеты.
-     */
-    public String getActiveWindowPackage() {
-        AccessibilityNodeInfo root = readableRoot();
-        if (root == null) return null;
-        CharSequence pkg = root.getPackageName();
-        return pkg == null ? null : pkg.toString();
-    }
 
     /**
      * Рекурсивный обход. Глубина ограничена: у некоторых приложений дерево

@@ -106,7 +106,7 @@ public class OverlayService extends Service {
     private long lastNewAt;
     private int screenW, screenH;
     /** Пакет приложения, которое читаем. При смене — останавливаем скан. */
-    private String scanningPackage;
+    private volatile String scanningPackage;
     /**
      * Кеш лаунчера: resolveActivity — это IPC в PackageManager, и звать его
      * каждые 600 мс в poll() незачем. Лаунчер за время сессии не меняется,
@@ -223,7 +223,7 @@ public class OverlayService extends Service {
             if (svc != null) {
                 pkg = svc.getActiveWindowPackage();
                 List<ScanAccessibilityService.Line> l1 =
-                        svc.readScreen(null, screenW, screenH, true);
+                        svc.readScreen(null, null, screenW, screenH, true);
                 before = l1 == null ? 0 : l1.size();
             }
             android.util.Log.d("ScreenTextScan",
@@ -235,7 +235,7 @@ public class OverlayService extends Service {
             int after = -1;
             if (svc != null) {
                 List<ScanAccessibilityService.Line> l2 =
-                        svc.readScreen(null, screenW, screenH, true);
+                        svc.readScreen(null, null, screenW, screenH, true);
                 after = l2 == null ? 0 : l2.size();
                 android.util.Log.d("ScreenTextScan",
                         "probe: lines(full)=" + after
@@ -469,8 +469,14 @@ public class OverlayService extends Service {
         if (svc != null) {
             activePkg = svc.getActiveWindowPackage();
             if (activePkg != null) {
+                /*
+                 * Читаем ТОЛЬКО окно приложения, к которому привязан скан
+                 * (scanningPackage): правило пользователя — «текст только
+                 * с того приложения, в котором я нахожусь». Первый опрос
+                 * (пакет ещё не привязан) читает активное окно.
+                 */
                 List<ScanAccessibilityService.Line> lines =
-                        svc.readScreen(zone, screenW, screenH, true);
+                        svc.readScreen(scanningPackage, zone, screenW, screenH, true);
                 /*
                  * Порядок чтения. Служба доступности обходит дерево по
                  * вложенности элементов, а не сверху вниз — без сортировки
@@ -511,14 +517,20 @@ public class OverlayService extends Service {
             return;
         } else {
             if (scanningPackage == null) {
+                // Привязка: читаем только это приложение — и все.
                 scanningPackage = currentPkg;
             } else if (!scanningPackage.equals(currentPkg)) {
-                // Пакет сменился — копируем накопленное и продолжаем.
-                if (acc.size() > 0) {
-                    copyToClipboard();
-                    acc.clear();
-                }
-                scanningPackage = currentPkg;
+                /*
+                 * Пользователь ушёл из приложения — закончить. Раньше скан
+                 * «шёл за ним» по всем приложениям с автокопией на каждом
+                 * переходе: в буфере смешивались чужие экраны. Теперь:
+                 * автокопия накопленного (внутри stopEverything) и стоп.
+                 * Оставаться в приложении считается и нахождение в шторке
+                 * или за клавиатурой — getActiveWindowPackage их пакетом
+                 * не считает.
+                 */
+                stopEverything();
+                return;
             }
             if (texts != null && !texts.isEmpty()) {
                 int added = acc.addAll(texts);
