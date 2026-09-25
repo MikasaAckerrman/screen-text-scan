@@ -45,6 +45,13 @@ public class OverlayService extends Service {
 
     public static final String ACTION_START = "com.screentextscan.START";
     public static final String ACTION_STOP_ALL = "com.screentextscan.STOP_ALL";
+    /**
+     * Диагностический режим для adb: один-два обхода дерева без зоны-
+     * селектора и шарика — только чтение и лог. Ничего не показывается
+     * на экране. Вызов: am start-foreground-service
+     * -n com.screentextscan/.OverlayService -a com.screentextscan.PROBE
+     */
+    public static final String ACTION_PROBE = "com.screentextscan.PROBE";
 
     private static final String CHANNEL = "sts_scan";
     private static final int NOTIF_ID = 41;
@@ -176,8 +183,63 @@ public class OverlayService extends Service {
             stopEverything();
             return START_NOT_STICKY;
         }
+        if (ACTION_PROBE.equals(action)) {
+            probe();
+            return START_NOT_STICKY;
+        }
         if (zoneView == null && bubble == null) showZoneSelector();
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Диагностический обход для adb: на экране ничего не появляется.
+     *
+     * Считает строки ДО включения полной подписки и ПОСЛЕ (2,5 с): так
+     * видно, влияет ли подписка на свежесть дерева. В лог уходят только
+     * количества и обрезки первых строк — не содержимое переписки.
+     */
+    private void probe() {
+        final Rect z = zone;
+        scanThread.execute(() -> {
+            ScanAccessibilityService svc = ScanAccessibilityService.get();
+            int before = -1;
+            String pkg = null;
+            if (svc != null) {
+                pkg = svc.getActiveWindowPackage();
+                List<ScanAccessibilityService.Line> l1 =
+                        svc.readScreen(null, screenW, screenH, true);
+                before = l1 == null ? 0 : l1.size();
+            }
+            android.util.Log.d("ScreenTextScan",
+                    "probe: pkg=" + (pkg == null ? "none" : pkg)
+                            + " zone=" + (z == null ? "null" : z.toString())
+                            + " lines(minimal)=" + before);
+            ScanAccessibilityService.setScanSubscription(true);
+            try { Thread.sleep(2500); } catch (InterruptedException ignored) { }
+            int after = -1;
+            if (svc != null) {
+                List<ScanAccessibilityService.Line> l2 =
+                        svc.readScreen(null, screenW, screenH, true);
+                after = l2 == null ? 0 : l2.size();
+                android.util.Log.d("ScreenTextScan",
+                        "probe: lines(full)=" + after
+                                + " sample=" + sampleForLog(l2));
+            }
+            ScanAccessibilityService.setScanSubscription(false);
+            ui.post(this::stopSelf);
+        });
+    }
+
+    /** Обрезки первых трёх строк для диагностического лога. */
+    private static String sampleForLog(List<ScanAccessibilityService.Line> lines) {
+        if (lines == null || lines.isEmpty()) return "[]";
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < Math.min(3, lines.size()); i++) {
+            if (i > 0) sb.append(" | ");
+            String t = lines.get(i).text;
+            sb.append(t.length() > 12 ? t.substring(0, 12) : t);
+        }
+        return sb.append(']').toString();
     }
 
     /**
@@ -650,10 +712,12 @@ public class OverlayService extends Service {
      */
     private void handleTap(final ScanBubbleView bv) {
         if (pendingSingleTap != null) {
-            // Второй тап в окне подтверждения → двойной тап.
+            // Второй тап в окне подтверждения → двойной тап: ЗАКРЫТЬ.
+            // Ничего не копируется и ничего не открывается — правило
+            // пользователя: копирование — это зажатие.
             ui.removeCallbacks(pendingSingleTap);
             pendingSingleTap = null;
-            finalizeScan();
+            closeScan();
             return;
         }
         pendingSingleTap = () -> {
@@ -665,44 +729,23 @@ public class OverlayService extends Service {
     }
 
     /**
-     * Двойной тап: закончить чтение и показать результат.
+     * Двойной тап: просто закрыть плавающее окно.
      *
-     * Накопленное не выбрасывается: строки уходят на экран результата, где
-     * их можно поправить, вычеркнуть, перевести и скопировать. Это тот
-     * экран, который MainActivity обещает текстом, но который раньше
-     * не открывался ниоткуда.
+     * Текст намеренно НЕ копируется и никакой экран не открывается:
+     * копирование — отдельный жест (зажатие), закрытие — отдельный.
      */
-    private void finalizeScan() {
+    private void closeScan() {
         if (!scanning) return;
-        int lines = acc.keptSize();
-        if (lines > 0) {
-            vibrate(false);
-            ResultActivity.pending = snapshotAcc();
-            // Экран результата теперь держит текст; автокопия в
-            // stopEverything() для этого пути не нужна и не сработает.
-            acc.clear();
-        } else {
-            Toast.makeText(this, "Прочитанного текста не было",
-                    Toast.LENGTH_SHORT).show();
-        }
+        acc.clear();       // закрыли сами — текст не нужен
+        scanning = false;  // автокопия в stopEverything() не сработает
         if (bubble != null) {
-            bubble.pop(() -> {
-                stopEverything();
-                openResult();
-            });
+            bubble.pop(this::stopEverything);
         } else {
             stopEverything();
-            openResult();
         }
     }
 
-    /** Экран результата поверх текущего приложения. */
-    private void openResult() {
-        if (ResultActivity.pending == null) return;
-        Intent i = new Intent(this, ResultActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        startActivity(i);
-    }
+
 
     /**
      * Замороженная копия накопителя для экрана результата. Копия, а не
@@ -716,10 +759,10 @@ public class OverlayService extends Service {
     }
 
     /**
-     * Долгое нажатие: убрать плавающее окно БЕЗ экрана результата.
+     * Долгое нажатие: СКОПИРОВАТЬ прочитанное и закрыть.
      *
-     * И здесь накопленное не теряется — уходит в буфер обмена с тостом:
-     * текст не должен пропасть ни на одном пути выхода.
+     * Ничего не открывается — только буфер обмена и тост. Это и есть
+     * жест копирования по правилу пользователя.
      */
     private void removeSilently() {
         if (scanning && acc.size() > 0) {
