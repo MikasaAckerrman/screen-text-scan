@@ -102,7 +102,12 @@ dependencies {
     // OCR для vision-режима: чтение ВЕГО экрана, включая интерфейсы,
     // которые не отдают текст дереву доступности (canvas, игры, битмапы).
     // On-device, работает офлайн; языки rus+eng (assets/tessdata, fast).
-    implementation 'cz.adaptech:tesseract4android:4.7.0'
+    // POM тянет дубль-вариант tesseract4android-openmp с теми же классами
+    // (leptonica/tesseract JNI) — mergeReleaseNativeLibs падает на
+    // дублированных .so. Исключаем openmp: базовый вариант самодостаточен.
+    implementation('cz.adaptech:tesseract4android:4.7.0') {
+        exclude group: 'cz.adaptech.tesseract4android', module: 'tesseract4android-openmp'
+    }
 
     /*
      * ПОЧЕМУ ЭТИ ТРИ СТРОКИ ОБЯЗАТЕЛЬНЫ. Без них сборка падает на
