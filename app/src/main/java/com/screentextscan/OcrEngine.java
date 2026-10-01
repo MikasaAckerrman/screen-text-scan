@@ -75,26 +75,43 @@ public final class OcrEngine {
     /**
      * Распознать кадр. Возвращает строки с экранными границами — те же
      * Line, что даёт обход дерева, поэтому дальше один конвейер.
+     *
+     * Сигнатуры сверены javap'ом по самому AAR: getWords() отдаёт Pixa
+     * (не список), слова даёт getResultIterator() с уровнем RIL_WORD=3
+     * из C++ PageIteratorLevel (в Java-обёртке констант нет).
      */
     public synchronized List<ScanAccessibilityService.Line> recognize(Bitmap bmp) {
         List<ScanAccessibilityService.Line> out = new ArrayList<>();
         if (tess == null || bmp == null) return out;
+        com.googlecode.tesseract.android.ResultIterator it = null;
         try {
             tess.setImage(bmp);
             // Page segmentation 11 = «разрежённый текст»: интерфейс — не
             // печатная страница, блоков и абзацев нет, строки разрознены.
             tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT);
-            String all = tess.getUTF8Text();
+            String all = tess.getUTF8Text(); // запускает само распознавание
             if (all == null || all.isEmpty()) return out;
-            tess.getWords().forEach(w -> {
-                String text = w.getUTF8Text().trim();
-                if (text.length() >= 2) {
-                    out.add(new ScanAccessibilityService.Line(text,
-                            new Rect(w.getBoundingBox()), false));
+            final int RIL_WORD = 3;
+            it = tess.getResultIterator();
+            if (it == null) return out;
+            it.begin();
+            do {
+                String text = it.getUTF8Text(RIL_WORD);
+                Rect b = it.getBoundingRect(RIL_WORD);
+                if (text != null && b != null) {
+                    text = text.trim();
+                    if (text.length() >= 2) {
+                        out.add(new ScanAccessibilityService.Line(text,
+                                new Rect(b), false));
+                    }
                 }
-            });
+            } while (it.next(RIL_WORD));
         } catch (RuntimeException ignored) {
             // битый кадр или движок умер — просто пусто
+        } finally {
+            if (it != null) {
+                try { it.delete(); } catch (RuntimeException ignored) { }
+            }
         }
         return out;
     }
