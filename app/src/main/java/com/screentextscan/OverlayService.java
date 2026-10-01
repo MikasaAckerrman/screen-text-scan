@@ -71,10 +71,15 @@ public class OverlayService extends Service {
 
     /**
      * Пауза между опросами. 600 мс — компромисс: обход дерева стоит около
-     * 50 мс, так что нагрузка мала, а листающий человек за это время не
-     * успевает пролистать больше экрана текста.
+     * 50 мс, такие опросы незаметны для батареи и не грузят поток.
      */
     private static final long POLL_MS = 600;
+    /**
+     * Пауза ДО привязки: экран только что открыт, пакет ещё не устоялся —
+     * спрашиваем чаще, чтобы начать читать как можно раньше («начинает
+     * читать только через несколько секунд» — лечится этим).
+     */
+    private static final long PRE_LOCK_MS = 250;
 
     /**
      * Через сколько без нового текста считаем, что видимый участок прочитан
@@ -113,8 +118,6 @@ public class OverlayService extends Service {
     private int screenW, screenH;
     /** Пакет приложения, которое читаем. При смене — останавливаем скан. */
     private volatile String scanningPackage;
-    /** Пакет предыдущего опроса — для проверки устойчивости привязки. */
-    private String lastPkg;
     /** Сколько опросов подряд виден чужой пакет (гистерезис ухода). */
     private int foreignPolls;
     /**
@@ -461,11 +464,18 @@ public class OverlayService extends Service {
                 return t;
             });
 
-    /** Следующий опрос: пауза POLL_MS, потом тяжёлая работа в фоне. */
+    /**
+     * Очередной опрос. Первый — мгновенно (без паузы), пока пакет не
+     * привязан — часто (250 мс), после привязки — 600 мс: «начинает
+     * читать только через несколько секунд» лечится здесь.
+     */
     private void schedulePoll(final int gen) {
         if (!scanning || gen != scanGeneration) return;
-        ui.postDelayed(() -> scanThread.execute(() -> pollBody(gen)), POLL_MS);
+        long delay = firstPoll ? 0 : (scanningPackage == null ? PRE_LOCK_MS : POLL_MS);
+        ui.postDelayed(() -> scanThread.execute(() -> pollBody(gen)), delay);
     }
+
+    private boolean firstPoll;
 
     /** Первый опрос цикла чтения (после выбора зоны). */
     private void startPolling() {
@@ -477,6 +487,7 @@ public class OverlayService extends Service {
          * минимальная подписка, чтобы не будить процесс круглосуточно.
          */
         ScanAccessibilityService.setScanSubscription(true);
+        firstPoll = true;
         schedulePoll(++scanGeneration);
     }
 
@@ -486,19 +497,25 @@ public class OverlayService extends Service {
      */
     private void pollBody(final int gen) {
         if (!scanning || gen != scanGeneration) return;
+        firstPoll = false;
         String activePkg = null;
         List<String> texts = null;
         ScanAccessibilityService svc = ScanAccessibilityService.get();
         if (svc != null) {
+            /*
+             * ПРИВЯЗКА и ЧТЕНИЕ — в одном цикле. Устойчивость пакета
+             * меряется по событиям (getStableWindowPackage): как только
+             * приложение удержалось на переднем плане 700 мс — привязка
+             * и СРАЗУ чтение его окна. Раньше первый текст ждал 2-3
+             * холостых цикла (600 мс задержка + дебаунс двумя опросами).
+             */
+            if (scanningPackage == null) {
+                String stable = svc.getStableWindowPackage(700);
+                if (stable != null) scanningPackage = stable;
+            }
             activePkg = svc.getActiveWindowPackage();
-            if (activePkg != null && scanningPackage != null) {
-                /*
-                 * Читаем ТОЛЬКО окно приложения, к которому привязан скан
-                 * (scanningPackage): правило пользователя — «текст только
-                 * с того приложения, в котором я нахожусь». Пока привязка
-                 * не устоялась (пакет должен повториться два опроса),
-                 * дерево не читаем вовсе.
-                 */
+            if (activePkg != null && scanningPackage != null
+                    && activePkg.equals(scanningPackage)) {
                 List<ScanAccessibilityService.Line> lines =
                         svc.readScreen(scanningPackage, zone, screenW, screenH, true);
                 /*
@@ -559,25 +576,12 @@ public class OverlayService extends Service {
                     return;
                 }
             }
-            if (scanningPackage == null) {
+            if (scanningPackage != null && !scanningPackage.equals(currentPkg)) {
                 /*
-                 * Привязка с УСТОЙЧИВОСТЬЮ: боковые панели (vivo.upslide),
-                 * всплывающие мини-приложения и переходники живут секунду и
-                 * уходят. Запереться на таком — прочитать 15 строк мусора и
-                 * тут же уйти в стоп. Блокируемся только на пакете,
-                 * повторившемся два опроса подряд (~1,2 с).
-                 */
-                if (lastPkg != null && lastPkg.equals(currentPkg)) {
-                    scanningPackage = currentPkg;
-                }
-                lastPkg = currentPkg;
-            } else if (!scanningPackage.equals(currentPkg)) {
-                /*
-                 * Уход тоже с гистерезисом: единичный прыжок (шторка,
-                 * сайдбар, системный диалог) приложением не считается.
-                 * Стоп — только если приложение ДЕЙСТВИТЕЛЬНО сменилось:
-                 * два опроса подряд в другом пакете. Автокопия — в
-                 * stopEverything: текст не пропадает.
+                 * Уход с гистерезисом: единичный прыжок (шторка, сайдбар,
+                 * системный диалог) приложением не считается. Стоп —
+                 * только после двух опросов подряд в чужом пакете.
+                 * Автокопия — в stopEverything: текст не пропадает.
                  */
                 if (++foreignPolls >= 2) {
                     stopEverything();
@@ -744,25 +748,28 @@ public class OverlayService extends Service {
                              */
                         }
                         if (!moved || !live) return true;
-                        // Окно касаний клэмпим по экрану (как copy as file);
-                        // окно эффектов держим так, чтобы круг оставался
-                        // в центре окна касаний — оно с NO_LIMITS, может
-                        // выходить за край, так что шарик теперь доезжает
-                        // до самой кромки.
+                        /*
+                         * ПЕРЕТАСКИВАНИЕ БЕЗ IPC: раньше каждый MOVE делал
+                         * два updateViewLayout (окно эффектов + окно
+                         * касаний) — это ~120 binder-вызовов в секунду,
+                         * заметных в подлагивании драга. Теперь оба окна
+                         * двигаются setTranslationX/Y (чистая отрисовка,
+                         * ноль IPC), а ОДИН updateViewLayout на пару окон
+                         * происходит при ACTION_UP — там, где позиция
+                         * реально фиксируется. Ограничение экрана
+                         * считается по математике, без обращений к
+                         * WindowManager.
+                         */
                         int ts = v.getWidth();
-                        touchParams.x = ZoneGeometry.clamp(origTx + dx, 0,
+                        int nx = ZoneGeometry.clamp(origTx + dx, 0,
                                 Math.max(0, screenW - ts));
-                        touchParams.y = ZoneGeometry.clamp(origTy + dy, 0,
+                        int ny = ZoneGeometry.clamp(origTy + dy, 0,
                                 Math.max(0, screenH - ts));
+                        v.setTranslationX(nx - origTx);
+                        v.setTranslationY(ny - origTy);
                         int off = (bubbleParams.width - ts) / 2;
-                        bubbleParams.x = touchParams.x - off;
-                        bubbleParams.y = touchParams.y - off;
-                        try {
-                            wm.updateViewLayout(bubbleTouch, touchParams);
-                            wm.updateViewLayout(bubble, bubbleParams);
-                        } catch (IllegalArgumentException ignored) {
-                            // Жест долетел до уже снятых окон — не двигаем.
-                        }
+                        fx.setTranslationX(nx - origTx);
+                        fx.setTranslationY(ny - origTy);
                         return true;
                     }
                     case MotionEvent.ACTION_UP:
@@ -775,6 +782,35 @@ public class OverlayService extends Service {
                             fx.onRelease();
                             fx.setAlpha(0.82f);
                             fx.cancelLongPressAnim();
+                        }
+                        /*
+                         * Фиксация позиции окна после трансляционного
+                         * перетаскивания: ОДНА пара updateViewLayout на
+                         * весь жест. После коммита трансляции сбрасываются
+                         * (окно уже стоит в новой точке).
+                         */
+                        if (moved && live) {
+                            int nx = ZoneGeometry.clamp(
+                                    origTx + (int) (e.getRawX() - startX), 0,
+                                    Math.max(0, screenW - v.getWidth()));
+                            int ny = ZoneGeometry.clamp(
+                                    origTy + (int) (e.getRawY() - startY), 0,
+                                    Math.max(0, screenH - v.getHeight()));
+                            touchParams.x = nx;
+                            touchParams.y = ny;
+                            int off = (bubbleParams.width - v.getWidth()) / 2;
+                            bubbleParams.x = nx - off;
+                            bubbleParams.y = ny - off;
+                            v.setTranslationX(0);
+                            v.setTranslationY(0);
+                            fx.setTranslationX(0);
+                            fx.setTranslationY(0);
+                            try {
+                                wm.updateViewLayout(bubbleTouch, touchParams);
+                                wm.updateViewLayout(bubble, bubbleParams);
+                            } catch (IllegalArgumentException ignored) {
+                                // Жест долетел до уже снятых окон — не двигаем.
+                            }
                         }
                         /*
                          * CANCEL приходит при снятии окна изнутри — тапом
@@ -843,14 +879,13 @@ public class OverlayService extends Service {
     }
 
     /**
-     * Долгое нажатие: СКОПИРОВАТЬ прочитанное и передать окну «Сохранить
-     * как файл» (copy as file, опенсорсный проект пользователя).
+     * Долгое нажатие: передать прочитанное окну «Сохранить как файл»
+     * (copy as file, опенсорсный проект пользователя).
      *
-     * ПЕРЕХОД: шарик летит в центр экрана (сжимаясь и растворяясь — 260 мс,
-     * замедление к концу), и на месте прилёта их карточка разворачивается
-     * scale 0.92→1 поверх проявляющегося скрима. Наш выход и их вход —
-     * один жест, «шарик стал карточкой». Код copy as file не трогаем —
-     * только вызываем его активность по прилёту.
+     * БУФЕР ОБМЕНА НЕ ТРОГАЕМ — правило пользователя: открывается окно
+     * copy as file, вставка туда уже сделана. Файл-дубликат пишем в фоне
+     * (наша диагностика); если окно copy as file не откроется — только
+     * тогда буфер, чтобы текст не потерялся.
      */
     private void removeSilently() {
         if (scanning && acc.size() > 0) {
@@ -858,21 +893,24 @@ public class OverlayService extends Service {
             vibrate(false);
             final String text = acc.text();
             final int kept = acc.keptSize();
-            copyToClipboard(text, kept);
             acc.clear();
+            scanThread.execute(() -> saveToFile(text));
+            Toast.makeText(this, "Строк: " + kept + " — сохранение…",
+                    Toast.LENGTH_SHORT).show();
             if (bubble != null && bubbleParams != null) {
-                final String fText = text;
                 float fromCx = bubbleParams.x + bubbleParams.width / 2f;
                 float fromCy = bubbleParams.y + bubbleParams.height / 2f;
                 bubble.cancelLongPressAnim();
                 bubble.flyToCenter(fromCx, fromCy,
                         screenW / 2f, screenH / 2f,
                         () -> {
-                            launchSaveAsFile(fText);
+                            // true = окно открылось; при сбое текст уйдёт
+                            // в буфер как последний рубеж сохранности.
+                            if (!launchSaveAsFile(text)) copyToClipboard(text, kept);
                             stopEverything();
                         });
             } else {
-                launchSaveAsFile(text);
+                if (!launchSaveAsFile(text)) copyToClipboard(text, kept);
                 stopEverything();
             }
         } else {
@@ -886,8 +924,12 @@ public class OverlayService extends Service {
      * Вызов ЯВНЫМ компонентом (не неявным интентом): не нужен chooser,
      * не нужна видимость пакетов — окно открывается сразу, каким бы ни
      * было окружение. Код copy as file не изменяем, только вызываем.
+     *
+     * @return true, если окно пошло открываться; false — copy as file
+     *         недоступен (не установлен/ошибка), вызывающий решает, куда
+     *         девать текст (буфер обмена как последний рубеж).
      */
-    private void launchSaveAsFile(String text) {
+    private boolean launchSaveAsFile(String text) {
         try {
             Intent i = new Intent("com.copyasfile.SAVE_TEXT")
                     .setComponent(new android.content.ComponentName(
@@ -895,10 +937,10 @@ public class OverlayService extends Service {
                     .putExtra(Intent.EXTRA_TEXT, text)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(i);
+            return true;
         } catch (RuntimeException e) {
-            // copy as file не установлен или окно не открылось — текст уже
-            // в буфере обмена, ничего не потеряно.
             android.util.Log.d("ScreenTextScan", "copyasfile: " + e);
+            return false;
         }
     }
 

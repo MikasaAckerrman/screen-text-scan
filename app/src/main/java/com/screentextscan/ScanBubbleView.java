@@ -125,9 +125,19 @@ public class ScanBubbleView extends View {
         dotPaint.setStyle(Paint.Style.FILL);
     }
 
-    public void setCount(int c) { count = c; invalidate(); }
+    public void setCount(int c) {
+        if (count == c) return;  // без изменений — без перерисовки
+        count = c;
+        invalidate();
+    }
     public void setReadiness(float r, boolean done) {
-        readiness = r < 0 ? 0 : (r > 1 ? 1 : r);
+        float clamped = r < 0 ? 0 : (r > 1 ? 1 : r);
+        int oldSteps = (int) (readiness * 60);
+        int newSteps = (int) (clamped * 60);
+        if (oldSteps == newSteps && done == complete && !crossAnimating) {
+            return;  // визуально не изменилось — не будим отрисовку
+        }
+        readiness = clamped;
         if (done && !complete) {
             // Запустить анимацию крестика при первом достижении готовности.
             crossAnimating = true;

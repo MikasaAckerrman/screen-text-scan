@@ -321,6 +321,8 @@ public class ScanAccessibilityService extends AccessibilityService {
      * оверлеи, SystemUI и клавиатуру не считаем).
      */
     private volatile String liveForegroundPkg;
+    /** Момент последней СМЕНЫ liveForegroundPkg — для оценки устойчивости. */
+    private volatile long livePkgSince;
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
@@ -333,7 +335,25 @@ public class ScanAccessibilityService extends AccessibilityService {
         String s = p.toString();
         if (s.equals(getPackageName()) || s.equals("com.android.systemui")
                 || s.equals("com.android.imf")) return;
-        liveForegroundPkg = s;
+        if (!s.equals(liveForegroundPkg)) {
+            liveForegroundPkg = s;
+            livePkgSince = android.os.SystemClock.uptimeMillis();
+        }
+    }
+
+    /**
+     * Пакет, удерживающийся на переднем плане не менее minStableMs.
+     *
+     * ЗАЧЕМ: транзиенты (боковая панель vivo, переходники) живут секунду;
+     * привязка на них = мусор в накопителе. Устойчивость меряем ПО
+     * СОБЫТИЯМ (событие смены пакета = точный момент), а не лишними
+     * опросами — старт чтения не ждёт холостых циклов.
+     */
+    public String getStableWindowPackage(long minStableMs) {
+        String p = liveForegroundPkg;
+        if (p == null) return null;
+        return (android.os.SystemClock.uptimeMillis() - livePkgSince) >= minStableMs
+                ? p : null;
     }
 
     /**
