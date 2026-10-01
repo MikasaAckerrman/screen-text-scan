@@ -105,11 +105,6 @@ public class ScanAccessibilityService extends AccessibilityService {
     }
 
     @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {
-        // Намеренно пусто: см. комментарий к классу — читаем по запросу.
-    }
-
-    @Override
     public void onInterrupt() {
     }
 
