@@ -139,8 +139,10 @@ public class OverlayService extends Service {
     private boolean visionRequested;
     /** Vision включён и работает. */
     private volatile boolean visionActive;
-    /** Минимальная пауза между OCR-кадрами (мс): OCR ~0,3-1 с на кадр. */
-    private static final long OCR_MIN_INTERVAL_MS = 1000;
+    /** Минимальная пауза между OCR-кадрами (мс): с обрезкой по зоне
+     * кадр распознаётся за десятки-сотни мс, 600 мс покрывает скролл.
+     */
+    private static final long OCR_MIN_INTERVAL_MS = 600;
     private long lastOcrAt;
 
     /**
@@ -204,8 +206,28 @@ public class OverlayService extends Service {
         android.graphics.Bitmap bmp = capture.capture();
         if (bmp == null) return null;
         try {
+            /*
+             * ОБРЕЗКА ПО ЗОНЕ ДО OCR: распознавать только рамку, которую
+             * обвёл пользователь — в разы быстрее полного экрана (OCR —
+             * главная статья времени кадра), поэтому чаще кадры и меньше
+             * пропущенного при быстром скролле. Координаты зоны —
+             * экранные, масштаб — bmp к экрану.
+             */
+            android.graphics.Bitmap target = bmp;
+            if (zone != null) {
+                float sx = (float) bmp.getWidth() / screenW;
+                float sy = (float) bmp.getHeight() / screenH;
+                int l = Math.max(0, Math.round(zone.left * sx));
+                int t = Math.max(0, Math.round(zone.top * sy));
+                int r = Math.min(bmp.getWidth(), Math.round(zone.right * sx));
+                int b = Math.min(bmp.getHeight(), Math.round(zone.bottom * sy));
+                if (r - l >= 8 && b - t >= 8) {
+                    target = android.graphics.Bitmap.createBitmap(bmp, l, t, r - l, b - t);
+                }
+            }
             ocr.ensureInit(this);
-            List<ScanAccessibilityService.Line> raw = ocr.recognize(bmp);
+            List<ScanAccessibilityService.Line> raw = ocr.recognize(target);
+            if (target != bmp) target.recycle();
             if (raw.isEmpty()) return raw;
             float scaleX = (float) screenW / bmp.getWidth();
             float scaleY = (float) screenH / bmp.getHeight();
@@ -218,12 +240,7 @@ public class OverlayService extends Service {
                         Math.round(b.top * scaleY),
                         Math.round(b.right * scaleX),
                         Math.round(b.bottom * scaleY));
-                /*
-                 * ЗОНА — та же семантика, что у обхода дерева: центр слова
-                 * внутри рамки, которую обвёл пользователь. Без этого vision
-                 * читал бы весь экран, игнорируя выбор (рамка «только чат»
-                 * тащила бы и тулбар).
-                 */
+                // Зона (та же семантика, что у дерева): центр слова в рамке.
                 if (zone != null && !zone.contains(sb.centerX(), sb.centerY())) {
                     continue;
                 }

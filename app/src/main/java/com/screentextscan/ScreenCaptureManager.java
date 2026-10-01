@@ -36,6 +36,11 @@ public final class ScreenCaptureManager {
     private VirtualDisplay display;
     private ImageReader reader;
     private int width, height;
+    /** Всегда СВЕЖИЙ кадр (обновляется слушателем) — см. start(). */
+    private volatile Bitmap latest;
+    /** Поток слушателя: конвертация кадра не должна занимать главный. */
+    private android.os.HandlerThread readerThread;
+    private android.os.Handler readerHandler;
 
     public boolean isReady() { return projection != null && reader != null; }
 
@@ -61,9 +66,20 @@ public final class ScreenCaptureManager {
             width = Math.max(320, p.x / 2);
             height = Math.max(320, p.y / 2);
             reader = ImageReader.newInstance(width, height,
-                    PixelFormat.RGBA_8888, 1);
-            reader.setOnImageAvailableListener(r -> { /* берём по запросу */ },
-                    null);
+                    PixelFormat.RGBA_8888, 2);
+            /*
+             * ДРЕНАЖ ОЧЕРЕДИ — критично. У поверхности буферов мало; если
+             * кадры НЕ забирать, очередь заполняется ПЕРВЫМ кадром и
+             * VirtualDisplay останавливается навсегда: тогда capture()
+             * вечно возвращает один и тот же устаревший кадр (экран на
+             * момент старта) — «текст не тот, при скролле не читается».
+             * Слушатель забирает НОВЕЙШИЙ кадр, конвертирует в Bitmap и
+             * закрывает Image — очередь всегда свободна, кадры текут.
+             */
+            readerThread = new android.os.HandlerThread("sts-reader");
+            readerThread.start();
+            readerHandler = new android.os.Handler(readerThread.getLooper());
+            reader.setOnImageAvailableListener(this::drainFrame, readerHandler);
             display = projection.createVirtualDisplay(
                     "sts-vision", width, height,
                     ctx.getResources().getDisplayMetrics().densityDpi,
@@ -79,38 +95,50 @@ public final class ScreenCaptureManager {
         }
     }
 
-    /**
-     * Свежий кадр. Первые кадры после старта бывают пустыми — ImageReader
-     * наполняется асинхронно, пустой кадр = null, вызывающий просто
-     * пропускает цикл.
-     */
-    public Bitmap capture() {
-        if (reader == null) return null;
+    /** Забрать новейший кадр в буфер-хранитель (вызывается слушателем). */
+    private void drainFrame(ImageReader r) {
         Image img = null;
         try {
-            img = reader.acquireLatestImage();
-            if (img == null) return null;
+            img = r.acquireLatestImage();
+            if (img == null) return;
             Image.Plane[] planes = img.getPlanes();
             int rowStride = planes[0].getRowStride();
             int pixelStride = planes[0].getPixelStride();
-            Bitmap full = Bitmap.createBitmap(
+            Bitmap nb = Bitmap.createBitmap(
                     rowStride / pixelStride, img.getHeight(),
                     Bitmap.Config.ARGB_8888);
-            full.copyPixelsFromBuffer(planes[0].getBuffer());
-            // Обрезаем выравнивание строки: createBitmap по rowStride может
-            // быть шире кадра.
-            Bitmap out = (full.getWidth() == width)
-                    ? full
-                    : Bitmap.createBitmap(full, 0, 0, width,
-                            Math.min(height, full.getHeight()));
-            if (out != full) full.recycle();
-            return out;
-        } catch (RuntimeException e) {
-            return null;
+            nb.copyPixelsFromBuffer(planes[0].getBuffer());
+            // Обрезаем выравнивание строки, если Bitmap шире кадра.
+            if (nb.getWidth() != width || nb.getHeight() != height) {
+                Bitmap cropped = Bitmap.createBitmap(nb, 0, 0,
+                        Math.min(width, nb.getWidth()),
+                        Math.min(height, nb.getHeight()));
+                nb.recycle();
+                nb = cropped;
+            }
+            Bitmap old = latest;
+            latest = nb;
+            if (old != null) old.recycle();
+        } catch (RuntimeException ignored) {
+            // битый кадр — пропускаем, следующий прибудет
         } finally {
             if (img != null) {
                 try { img.close(); } catch (RuntimeException ignored) { }
             }
+        }
+    }
+
+    /**
+     * Свежий кадр (копия — вызывающий распоряжается ею и утилизирует).
+     * NULL = кадр ещё не пришёл (первые ~100 мс после старта).
+     */
+    public Bitmap capture() {
+        Bitmap l = latest;
+        if (l == null) return null;
+        try {
+            return Bitmap.createBitmap(l);
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 
@@ -124,9 +152,18 @@ public final class ScreenCaptureManager {
             try { reader.close(); } catch (RuntimeException ignored) { }
             reader = null;
         }
+        if (readerThread != null) {
+            readerThread.quitSafely();
+            try { readerThread.join(200); } catch (InterruptedException ignored) { }
+            readerThread = null;
+            readerHandler = null;
+        }
         if (projection != null) {
             try { projection.stop(); } catch (RuntimeException ignored) { }
             projection = null;
         }
+        Bitmap l = latest;
+        latest = null;
+        if (l != null) l.recycle();
     }
 }
