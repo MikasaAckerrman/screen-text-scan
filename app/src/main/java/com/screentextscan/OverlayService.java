@@ -672,6 +672,15 @@ public class OverlayService extends Service {
                 if (stable != null) scanningPackage = stable;
             }
             activePkg = svc.getActiveWindowPackage();
+            /*
+             * КЛАВИАТУРА — не приложение: печать во время чтения не
+             * считается сменой пакета (иначе скан переключался на IME и
+             * читал подсказки клавиатуры). Определение — по типу окна,
+             * GBoard/сторонние IME включены.
+             */
+            if (activePkg != null && svc.isImePackage(activePkg)) {
+                activePkg = null;
+            }
             if (activePkg != null && scanningPackage != null
                     && activePkg.equals(scanningPackage)) {
                 List<ScanAccessibilityService.Line> lines = null;

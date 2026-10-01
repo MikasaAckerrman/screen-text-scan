@@ -374,6 +374,31 @@ public class ScanAccessibilityService extends AccessibilityService {
      * не клиентский кэш. Пусто (служба только подключилась, событий ещё
      * не было) — честный null: poll подождёт первое событие.
      */
+    /**
+     * Пакеты клавиатур, живущие сейчас на экране. Определяются по ТИПУ
+     * окна (TYPE_INPUT_METHOD), а не по имени: AOSP-имя com.android.imf
+     * не покрывает GBoard (com.google.android.inputmethod.latin) и
+     * сторонние IME — имя в блоклисте пропускало реальные клавиатуры,
+     * и печать во время чтения «переключала» скан на клавиатуру.
+     */
+    public boolean isImePackage(String pkg) {
+        if (pkg == null) return false;
+        if (pkg.equals("com.android.imf")) return true;
+        List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
+        if (ws == null) return false;
+        for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
+            if (w == null) continue;
+            if (w.getType() == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                AccessibilityNodeInfo r = w.getRoot();
+                if (r != null) {
+                    CharSequence p = r.getPackageName();
+                    if (p != null && p.toString().equals(pkg)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public String getActiveWindowPackage() {
         return liveForegroundPkg;
     }
