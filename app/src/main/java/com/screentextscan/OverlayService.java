@@ -59,6 +59,12 @@ public class OverlayService extends Service {
      * (сохранённая рамка). Остановка: ACTION_STOP_ALL.
      */
     public static final String ACTION_SCAN_QUIET = "com.screentextscan.SCAN_QUIET";
+    /**
+     * Диагностический дамп текстовых кандидатов (флаги контролов, границы,
+     * обрезки текста) — для настройки фильтра по живым данным. Ничего не
+     * копирует и не показывает.
+     */
+    public static final String ACTION_DUMP = "com.screentextscan.DUMP";
 
     private static final String CHANNEL = "sts_scan";
     private static final int NOTIF_ID = 41;
@@ -111,6 +117,11 @@ public class OverlayService extends Service {
     private String lastPkg;
     /** Сколько опросов подряд виден чужой пакет (гистерезис ухода). */
     private int foreignPolls;
+    /**
+     * Пауза на главном экране: шарик спрятан, чтение стоит, накопитель
+     * и привязка живут. Возврат в приложение — продолжение без потерь.
+     */
+    private volatile boolean paused;
     /**
      * Кеш лаунчера: resolveActivity — это IPC в PackageManager, и звать его
      * каждые 600 мс в poll() незачем. Лаунчер за время сессии не меняется,
@@ -192,6 +203,14 @@ public class OverlayService extends Service {
         }
         if (ACTION_SCAN_QUIET.equals(action)) {
             quietScan(intent.getStringExtra("zone"));
+            return START_NOT_STICKY;
+        }
+        if (ACTION_DUMP.equals(action)) {
+            scanThread.execute(() -> {
+                ScanAccessibilityService svc = ScanAccessibilityService.get();
+                if (svc != null) svc.dumpCandidates();
+                ui.post(this::stopSelf);
+            });
             return START_NOT_STICKY;
         }
         if (zoneView == null && bubble == null) showZoneSelector();
@@ -517,10 +536,29 @@ public class OverlayService extends Service {
             // Свои оверлеи — не считаем сменой окна. (readableRoot уже
             // подменяет их окном приложения под ними, ветка — страховка.)
         } else if (isLauncherPackage(currentPkg)) {
-            // Пользователь вышел на главный экран — убрать шарик.
-            stopEverything();
+            /*
+             * Главный экран — ПАУЗА, не стоп (правило 01.10: «на главном
+             * шарик пропадает, при возврате в приложение возвращается
+             * без потерь»). Шарик и опрос дерева скрываются, накопитель
+             * и зона живут; возврат в то же приложение — продолжение,
+             * уход в другое — автокопия и стоп как обычно.
+             */
+            if (!paused) pauseScan();
+            schedulePoll(gen);
             return;
         } else {
+            if (paused) {
+                // Возврат в приложение чтения — показать шарик и продолжить.
+                if (currentPkg.equals(scanningPackage)) {
+                    paused = false;
+                    showBubble();
+                    updateNotification("Читаю. Листайте текст. Зажать=копировать, двойной=закрыть.");
+                } else {
+                    // Из главного экрана ушли в другое приложение — финал.
+                    stopEverything();
+                    return;
+                }
+            }
             if (scanningPackage == null) {
                 /*
                  * Привязка с УСТОЙЧИВОСТЬЮ: боковые панели (vivo.upslide),
@@ -805,17 +843,44 @@ public class OverlayService extends Service {
     /**
      * Долгое нажатие: СКОПИРОВАТЬ прочитанное и закрыть.
      *
-     * Ничего не открывается — только буфер обмена и тост. Это и есть
-     * жест копирования по правилу пользователя.
+     * Копия идёт и в буфер обмена, и в «Сохранить как файл» (copy as
+     * file, опенсорсный проект пользователя): появляется окно сохранения
+     * — текст там уже вставлен. Код copy as file не трогаем — только
+     * вызываем его активность.
      */
     private void removeSilently() {
         if (scanning && acc.size() > 0) {
             if (bubble != null) bubble.flashCopy();
             vibrate(false);
-            copyToClipboard();
+            final String text = acc.text();
+            final int kept = acc.keptSize();
+            copyToClipboard(text, kept);
             acc.clear();
+            launchSaveAsFile(text);
         }
         stopEverything();
+    }
+
+    /**
+     * Открыть окно «Сохранить как файл» с готовым текстом.
+     *
+     * Вызов ЯВНЫМ компонентом (не неявным интентом): не нужен chooser,
+     * не нужна видимость пакетов — окно открывается сразу, каким бы ни
+     * было окружение. Код copy as file не изменяем, только вызываем.
+     */
+    private void launchSaveAsFile(String text) {
+        try {
+            Intent i = new Intent("com.copyasfile.SAVE_TEXT")
+                    .setComponent(new android.content.ComponentName(
+                            "com.copyasfile", "com.copyasfile.SaveActivity"))
+                    .putExtra(Intent.EXTRA_TEXT, text)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (RuntimeException e) {
+            // copy as file не установлен или окно не открылось — текст уже
+            // в буфере обмена, ничего не потеряно.
+            android.util.Log.d("ScreenTextScan", "copyasfile: " + e);
+        }
     }
 
     /* ==================================================================
@@ -826,9 +891,12 @@ public class OverlayService extends Service {
      * Копировать накопленный текст в буфер обмена.
      * Не останавливает скан — пользователь может продолжить чтение.
      */
+    /** Копия накопленного (параметры — снять снапшот до очистки acc). */
     private void copyToClipboard() {
-        final String text = acc.text();
-        final int kept = acc.keptSize();
+        copyToClipboard(acc.text(), acc.keptSize());
+    }
+
+    private void copyToClipboard(final String text, final int kept) {
         // Диск — в фон: запись файла на главном потоке стопорила
         // интерфейс («лагает, когда нажимаешь»).
         scanThread.execute(() -> saveToFile(text));

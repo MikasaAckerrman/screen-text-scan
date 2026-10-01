@@ -146,6 +146,42 @@ public class ScanAccessibilityService extends AccessibilityService {
      * удалён); до 28 остаёмся на кэше — таких устройств у приложения нет.
      * Возвращает false, если узел исчез (элемент списка переработан).
      */
+    /**
+     * Диагностический дамп всех текстовых кандидатов текущего экрана —
+     * для настройки фильтра контролов. В лог: флаги (clickable у узла и
+     * родителя, editable), границы и обрезка текста. Ничего не копирует.
+     */
+    public void dumpCandidates() {
+        AccessibilityNodeInfo root = readableRoot(liveForegroundPkg);
+        if (root == null) {
+            android.util.Log.d("ScreenTextScan", "dump: root=null");
+            return;
+        }
+        class V {
+            void walk(AccessibilityNodeInfo n, int depth, boolean parentClickable) {
+                if (n == null || depth > 40) return;
+                CharSequence cs = n.getText();
+                String t = cs == null ? "" : cs.toString().trim();
+                CharSequence d = n.getContentDescription();
+                String ds = d == null ? "" : d.toString().trim();
+                if (!t.isEmpty() || !ds.isEmpty()) {
+                    Rect b = new Rect();
+                    n.getBoundsInScreen(b);
+                    android.util.Log.d("ScreenTextScan", "dump: c=" + n.isClickable()
+                            + " pc=" + parentClickable
+                            + " e=" + n.isEditable()
+                            + " w=" + b.width() + " h=" + b.height()
+                            + " t=[" + (t.length() > 24 ? t.substring(0, 24) : t)
+                            + "] d=[" + (ds.length() > 24 ? ds.substring(0, 24) : ds) + "]");
+                }
+                for (int i = 0; i < n.getChildCount(); i++) {
+                    walk(n.getChild(i), depth + 1, n.isClickable() || parentClickable);
+                }
+            }
+        }
+        new V().walk(root, 0, false);
+    }
+
     private static boolean refreshFromSource(AccessibilityNodeInfo node) {
         if (Build.VERSION.SDK_INT < 28) return true;
         try {
@@ -167,7 +203,7 @@ public class ScanAccessibilityService extends AccessibilityService {
          */
         if (!refreshFromSource(root)) return out;
         visitedNodes = 0;
-        collect(root, zone, screenW, screenH, includeDesc, out, 0);
+        collect(root, zone, screenW, screenH, includeDesc, out, 0, false);
         return out;
     }
 
@@ -325,9 +361,20 @@ public class ScanAccessibilityService extends AccessibilityService {
      */
     private void collect(AccessibilityNodeInfo node, Rect zone,
                          int screenW, int screenH, boolean includeDesc,
-                         List<Line> out, int depth) {
+                         List<Line> out, int depth, boolean parentClickable) {
         if (node == null || depth > 60) return;
         if (++visitedNodes > MAX_NODES) return;
+
+        /*
+         * ФИЛЬТР КОНТРОЛОВ (корень «скопировал текст, которого не вижу»:
+         * «Копировать», «Нравится», «Новый чат», «Вниз», подсказка ввода).
+         * Текст кнопки — не контент: узел кликабелен, его родитель
+         * кликабелен (подпись внутри кнопки) или это поле ввода (текст
+         * поля — подсказка/набранное). Контент чата и статей этими
+         * флагами не обладает.
+         */
+        boolean selfControl = node.isClickable() || parentClickable
+                || node.isEditable();
 
         /*
          * РЕБИНД-ФИКС (корень «прочитал 5 строк и замолчал»). Кэш
@@ -343,13 +390,15 @@ public class ScanAccessibilityService extends AccessibilityService {
         if (node.isScrollable()) refreshFromSource(node);
 
         CharSequence cs = node.getText();
-        if (cs != null && cs.length() > 0) {
-            if (!refreshFromSource(node)) {
-                cs = null;            // узел исчез — перечитывать нечего
-            } else {
-                cs = node.getText();  // актуальный текст мимо кэша
-            }
-        }
+        if (selfControl) cs = null;
+        /*
+         * Пер-узловый refresh() (лекарство v1.9 от замороженного кэша)
+         * снят 01.10: он стоил по IPC-циклу на каждый текст и давал
+         * «с задержкой читается». Свежесть теперь обеспечивают живой
+         * трекер переднего плана и полная подписка на события во время
+         * чтения; refresh остался на корне и скроллящих контейнерах —
+         * их один-три, и они обновляют структуру (число детей).
+         */
         String text = cs == null ? null : cs.toString().trim();
         /*
          * contentDescription — только у ЛИСТА без кликабельности: это
@@ -358,7 +407,8 @@ public class ScanAccessibilityService extends AccessibilityService {
          * («Отправить», «Уведомление»), его пропускаем.
          */
         if ((text == null || text.isEmpty()) && includeDesc
-                && node.getChildCount() == 0 && !node.isClickable()) {
+                && node.getChildCount() == 0 && !node.isClickable()
+                && !parentClickable) {
             CharSequence d = node.getContentDescription();
             text = d == null ? null : d.toString().trim();
         }
@@ -415,7 +465,8 @@ public class ScanAccessibilityService extends AccessibilityService {
         for (int i = 0; i < n; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child == null) continue;
-            collect(child, zone, screenW, screenH, includeDesc, out, depth + 1);
+            collect(child, zone, screenW, screenH, includeDesc, out,
+                    depth + 1, node.isClickable() || parentClickable);
         }
     }
 
