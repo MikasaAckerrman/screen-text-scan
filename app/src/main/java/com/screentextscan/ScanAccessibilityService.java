@@ -81,8 +81,10 @@ public class ScanAccessibilityService extends AccessibilityService {
             info.eventTypes = full
                     ? (AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                         | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-                        | AccessibilityEvent.TYPE_VIEW_SCROLLED)
-                    : AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+                        | AccessibilityEvent.TYPE_VIEW_SCROLLED
+                        | AccessibilityEvent.TYPE_WINDOWS_CHANGED)
+                    : (AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                        | AccessibilityEvent.TYPE_WINDOWS_CHANGED);
             s.setServiceInfo(info);
         } catch (RuntimeException ignored) {
             // Служба перепривязывается — подписку вернёт onServiceConnected.
@@ -233,6 +235,16 @@ public class ScanAccessibilityService extends AccessibilityService {
                     }
                 }
             }
+            // Список окон может отставать (он тоже обновляется событиями,
+            // см. liveForegroundPkg) — тогда берём активное окно, если оно
+            // принадлежит цели.
+            if (fallback == null) {
+                AccessibilityNodeInfo active = getRootInActiveWindow();
+                if (active != null) {
+                    CharSequence p = active.getPackageName();
+                    if (p != null && p.toString().equals(targetPkg)) return active;
+                }
+            }
             return fallback;
         }
 
@@ -263,20 +275,43 @@ public class ScanAccessibilityService extends AccessibilityService {
     }
 
     /**
-     * Пакет, в котором пользователь находится СЕЙЧАС — для детекта ухода
-     * из приложения. Свои оверлеи, SystemUI (шторка) и клавиатура «своим»
-     * приложением не считаются: пользователь не покидал приложение.
+     * ЖИВОЙ пакет приложения на переднем плане.
+     *
+     * ПОЧЕМУ НЕ getRootInActiveWindow(). Воспроизведено 01.10: пользователь
+     * в Ozon, а «активное окно» и весь список getWindows() у клиента a11y
+     * застряли на Firefox С УТРА — указатель активного окна и список окон
+     * обновляются только СОБЫТИЯМИ, которых наш клиент не получал. Скан
+     * привязывался к вруну и читал не то приложение — «читается не с
+     * экрана».
+     *
+     * СОБЫТИЯ — единственный живой источник: они приходят в момент смены
+     * окна, кэш не участвует. onAccessibilityEvent записывает сюда пакет
+     * каждого TYPE_WINDOW_STATE_CHANGED / TYPE_WINDOWS_CHANGED (свои
+     * оверлеи, SystemUI и клавиатуру не считаем).
+     */
+    private volatile String liveForegroundPkg;
+
+    @Override
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event == null) return;
+        int t = event.getEventType();
+        if (t != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                && t != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return;
+        CharSequence p = event.getPackageName();
+        if (p == null) return;
+        String s = p.toString();
+        if (s.equals(getPackageName()) || s.equals("com.android.systemui")
+                || s.equals("com.android.imf")) return;
+        liveForegroundPkg = s;
+    }
+
+    /**
+     * Пакет приложения на переднем плане СЕЙЧАС — живой трекер событий,
+     * не клиентский кэш. Пусто (служба только подключилась, событий ещё
+     * не было) — честный null: poll подождёт первое событие.
      */
     public String getActiveWindowPackage() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return null;
-        CharSequence p = root.getPackageName();
-        if (p == null) return null;
-        String s = p.toString();
-        if (s.equals(getPackageName())
-                || s.equals("com.android.systemui")
-                || s.equals("com.android.imf")) return null;
-        return s;
+        return liveForegroundPkg;
     }
 
     /**
