@@ -14,5 +14,7 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // tesseract4android живёт на JitPack (в Maven Central его нет).
+        maven { url 'https://jitpack.io' }
     }
 }

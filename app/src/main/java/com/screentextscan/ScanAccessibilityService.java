@@ -324,6 +324,19 @@ public class ScanAccessibilityService extends AccessibilityService {
     /** Момент последней СМЕНЫ liveForegroundPkg — для оценки устойчивости. */
     private volatile long livePkgSince;
 
+    /**
+     * Пакеты-ОВЕРЛЕИ, не являющиеся приложениями пользователя: их события
+     * смены окна НЕ переключают трекер. Данные 01.10: боковая панель
+     * vivo.upslide перехватывала статус «активного окна», пока
+     * пользователь был в Ozon/DeepSeek — скан привязывался к панели, в
+     * которой нет текста, и «не читался» ни один запуск из таких окон.
+     */
+    private static final java.util.Set<String> OVERLAY_PKGS =
+            java.util.Collections.unmodifiableSet(new java.util.HashSet<>(java.util.Arrays.asList(
+                    "com.android.systemui",     // шторка, статус-бар
+                    "com.android.imf",          // клавиатура
+                    "com.vivo.upslide")));      // боковая панель Vivo/iQOO
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
@@ -333,8 +346,7 @@ public class ScanAccessibilityService extends AccessibilityService {
         CharSequence p = event.getPackageName();
         if (p == null) return;
         String s = p.toString();
-        if (s.equals(getPackageName()) || s.equals("com.android.systemui")
-                || s.equals("com.android.imf")) return;
+        if (s.equals(getPackageName()) || OVERLAY_PKGS.contains(s)) return;
         if (!s.equals(liveForegroundPkg)) {
             liveForegroundPkg = s;
             livePkgSince = android.os.SystemClock.uptimeMillis();

@@ -670,38 +670,52 @@ public class OverlayService extends Service {
             // подменяет их окном приложения под ними, ветка — страховка.)
         } else if (isLauncherPackage(currentPkg)) {
             /*
-             * Главный экран — ПАУЗА, не стоп (правило 01.10: «на главном
-             * шарик пропадает, при возврате в приложение возвращается
-             * без потерь»). Шарик и опрос дерева скрываются, накопитель
-             * и зона живут; возврат в то же приложение — продолжение,
-             * уход в другое — автокопия и стоп как обычно.
+             * Главный экран — ПАУЗА (правило 01.10: «на главном шарик
+             * пропадает, при возврате возвращается без потерь»). Опрос
+             * продолжается ДЁШЕВО — без обхода дерева (пакет не совпадает
+             * с целью, readScreen не вызывается): так мы замечаем
+             * возвращение в приложение. Таймаут тишины на паузе НЕ
+             * тикает (раньше убивал скан на главном: «окно иногда
+             * пропадает, когда захожу на главный экран»).
              */
             if (!paused) pauseScan();
             schedulePoll(gen);
             return;
         } else {
             if (paused) {
-                // Возврат в приложение чтения — показать шарик и продолжить.
-                if (currentPkg.equals(scanningPackage)) {
-                    paused = false;
-                    showBubble();
-                    updateNotification("Читаю. Листайте текст. Зажать=копировать, двойной=закрыть.");
-                } else {
-                    // Из главного экрана ушли в другое приложение — финал.
-                    stopEverything();
-                    return;
-                }
-            }
-            if (scanningPackage != null && !scanningPackage.equals(currentPkg)) {
                 /*
-                 * Уход с гистерезисом: единичный прыжок (шторка, сайдбар,
-                 * системный диалог) приложением не считается. Стоп —
-                 * только после двух опросов подряд в чужом пакете.
-                 * Автокопия — в stopEverything: текст не пропадает.
+                 * Возврат из главного экрана: в то же приложение — просто
+                 * продолжить; в ДРУГОЕ — сменить цель (авто-граница
+                 * скопирует накопленное, ничего не смешается).
+                 */
+                paused = false;
+                lastNewAt = System.currentTimeMillis();
+                foreignPolls = 0;
+                if (scanningPackage != null && !currentPkg.equals(scanningPackage)) {
+                    boundaryCopy();
+                    scanningPackage = currentPkg;
+                }
+                showBubble();
+                updateNotification("Читаю. Листайте текст. Зажать=копировать, двойной=закрыть.");
+            } else if (scanningPackage != null
+                    && !scanningPackage.equals(currentPkg)) {
+                /*
+                 * Пользователь ПЕРЕКЛЮЧИЛСЯ на другое приложение — читать
+                 * его (правило 01.10: «я могу поменять приложение, и ты
+                 * тоже должен будешь прочитать»). Гистерезис — два опроса
+                 * подряд в новом пакете, чтобы транзиенты (диалоги) не
+                 * дёргали цель. Авто-граница: накопленное прежнего
+                 * приложения копируется, накопитель очищается — тексты
+                 * приложений не смешиваются.
                  */
                 if (++foreignPolls >= 2) {
-                    stopEverything();
-                    return;
+                    boundaryCopy();
+                    scanningPackage = currentPkg;
+                    foreignPolls = 0;
+                    silentPolls = 0;
+                    lastNewAt = System.currentTimeMillis();
+                    updateNotification("Читаю " + currentPkg
+                            + ". Зажать=копировать, двойной=закрыть.");
                 }
             } else {
                 foreignPolls = 0;
@@ -730,7 +744,9 @@ public class OverlayService extends Service {
             bubble.setReadiness(readiness, idle >= COMPLETE_AFTER_MS && acc.size() > 0);
         }
 
-        if (idle > IDLE_LIMIT_MS) {
+        // На паузе (главный экран) таймаут тишины не срабатывает: текст не
+        // появляется, потому что чтение сознательно остановлено.
+        if (!paused && idle > IDLE_LIMIT_MS) {
             stopEverything();
             return;
         }
@@ -1173,8 +1189,24 @@ public class OverlayService extends Service {
      */
     private void pauseScan() {
         paused = true;
+        // Таймеры с чистого листа: возврат из паузы не должен мгновенно
+        // уйти в таймаут тишины по старому времени.
+        lastNewAt = System.currentTimeMillis();
         removeBubbleViews();
         updateNotification("Пауза: вернитесь в приложение — чтение продолжится");
+    }
+
+    /**
+     * Авто-граница при смене приложения: накопленное прежнего приложения
+     * уходит в буфер обмена и файл, накопитель очищается — тексты
+     * приложений не смешиваются, ничего не теряется. Ничего не
+     * открывается: окно copy as file — только жест зажатия.
+     */
+    private void boundaryCopy() {
+        if (acc.size() > 0) {
+            copyToClipboard();
+            acc.clear();
+        }
     }
 
     /** Проверить, является ли пакет домашним экраном (лаунчером). */
