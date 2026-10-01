@@ -717,19 +717,28 @@ public class OverlayService extends Service {
                     silentPolls = 0;
                 }
                 /*
-                 * Порядок чтения. Служба доступности обходит дерево по
-                 * вложенности элементов, а не сверху вниз — без сортировки
-                 * строки копировались бы вперемешку. ReadingOrder.sort
-                 * раскладывает их по строкам-полосам сверху вниз, слева
-                 * направо, а виртуальные (WebView, координаты от начала
-                 * документа) выносит отдельной группой в конец, чтобы они
-                 * не перемешались с экранными.
+                 * NPE-гвард: при живом vision опрос, пришедший раньше
+                 * OCR-интервала, НЕ читает кадр — lines остаётся null.
+                 * Раньше блок ниже падал на lines.size() → краш процесса →
+                 * служба доступности в Crashed. Пропускаем цикл молча:
+                 * накопления нет, остановки нет.
                  */
-                List<ReadingOrder.Item> items = new ArrayList<>(lines.size());
-                for (ScanAccessibilityService.Line l : lines) {
-                    items.add(new ReadingOrder.Item(l.text, l.bounds, l.virtual));
+                if (lines != null && !lines.isEmpty()) {
+                    /*
+                     * Порядок чтения. Служба доступности обходит дерево по
+                     * вложенности элементов, а не сверху вниз — без сортировки
+                     * строки копировались бы вперемешку. ReadingOrder.sort
+                     * раскладывает их по строкам-полосам сверху вниз, слева
+                     * направо, а виртуальные (WebView, координаты от начала
+                     * документа) выносит отдельной группой в конец, чтобы они
+                     * не перемешались с экранными.
+                     */
+                    List<ReadingOrder.Item> items = new ArrayList<>(lines.size());
+                    for (ScanAccessibilityService.Line l : lines) {
+                        items.add(new ReadingOrder.Item(l.text, l.bounds, l.virtual));
+                    }
+                    texts = ReadingOrder.sort(items);
                 }
-                texts = ReadingOrder.sort(items);
             }
         }
         final String pkg = activePkg;
