@@ -31,7 +31,7 @@ android {
         // База защищает от downgrade даже если workflow когда-нибудь
         // пересоздадут и GITHUB_RUN_NUMBER снова начнётся с единицы.
         versionCode 10_000 + (ciRunNumber ? ciRunNumber.toInteger() : 0)
-        versionName '1.15'
+        versionName '1.16'
     }
 
     signingConfigs {
@@ -99,6 +99,10 @@ dependencies {
      * это ~1.5 МБ кода в APK, сами модели в APK НЕ входят.
      */
     implementation 'com.google.mlkit:translate:17.0.3'
+    // OCR для vision-режима: чтение ВЕГО экрана, включая интерфейсы,
+    // которые не отдают текст дереву доступности (canvas, игры, битмапы).
+    // On-device, работает офлайн; языки rus+eng (assets/tessdata, fast).
+    implementation 'cz.adaptech:tesseract4android:4.7.0'
 
     /*
      * ПОЧЕМУ ЭТИ ТРИ СТРОКИ ОБЯЗАТЕЛЬНЫ. Без них сборка падает на

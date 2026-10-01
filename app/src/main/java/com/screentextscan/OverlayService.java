@@ -125,6 +125,90 @@ public class OverlayService extends Service {
      * и привязка живут. Возврат в приложение — продолжение без потерь.
      */
     private volatile boolean paused;
+
+    /* ================================================================
+       Vision-режим: чтение ВСЕГО экрана, когда дерево доступности
+       молчит (canvas, игры, битмапы — интерфейсы без текста в a11y).
+       ================================================================ */
+
+    private final ScreenCaptureManager capture = new ScreenCaptureManager();
+    private final OcrEngine ocr = new OcrEngine();
+    /** Сколько опросов подряд окно не отдало ни одной строки. */
+    private int silentPolls;
+    /** Разрешение на захват экрана уже запрашивалось в этом скане. */
+    private boolean visionRequested;
+    /** Vision включён и работает. */
+    private volatile boolean visionActive;
+    /** Минимальная пауза между OCR-кадрами (мс): OCR ~0,3-1 с на кадр. */
+    private static final long OCR_MIN_INTERVAL_MS = 1000;
+    private long lastOcrAt;
+
+    /**
+     * Окно молчит несколько опросов — включить чтение экрана снимками.
+     * Диалог разрешения показывается один раз за скан; отказ = просто
+     * остаёмся на a11y (сканер работает как раньше).
+     */
+    private void considerVision() {
+        if (visionRequested || !scanning) return;
+        visionRequested = true;
+        android.util.Log.d("ScreenTextScan",
+                "vision: интерфейс молчит для a11y — запрашиваю захват экрана");
+        // Android 14+: сервис должен РАБОТАТЬ с типом mediaProjection до
+        // запроса разрешения на захват — поднимаем тип сейчас.
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                startForeground(NOTIF_ID, buildNotification(
+                                "Читаю экран распознаванием (для недоступных интерфейсов)"),
+                        FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                                | FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            } catch (RuntimeException ignored) {
+                // тип не поднят — захват просто не стартует, a11y остаётся
+            }
+        }
+        capture.requestGrant(this, granted -> { /* доставит deliverVisionGrant */ });
+    }
+
+    /** Разрешение получено (из VisionGrantActivity через deliverVisionGrant). */
+    private void onVisionGranted(int resultCode, android.content.Intent data) {
+        if (!scanning) return;
+        ui.post(() -> {
+            capture.start(this, resultCode, data);
+            visionActive = capture.isReady();
+            android.util.Log.d("ScreenTextScan", "vision: active=" + visionActive);
+        });
+    }
+
+    /**
+     * Снимок + распознавание. NULL = кадр ещё не готов (первые кадры
+     * ImageReader пусты) — просто пропускаем цикл. Координаты OCR — в
+     * половинном разрешении захвата, поэтому масштабируем к экранным:
+     * конвейер ReadingOrder/зоны считает в экранных координатах.
+     */
+    private List<ScanAccessibilityService.Line> visionRead() {
+        android.graphics.Bitmap bmp = capture.capture();
+        if (bmp == null) return null;
+        try {
+            ocr.ensureInit(this);
+            List<ScanAccessibilityService.Line> raw = ocr.recognize(bmp);
+            if (raw.isEmpty()) return raw;
+            float scaleX = (float) screenW / bmp.getWidth();
+            float scaleY = (float) screenH / bmp.getHeight();
+            List<ScanAccessibilityService.Line> scaled =
+                    new ArrayList<>(raw.size());
+            for (ScanAccessibilityService.Line l : raw) {
+                Rect b = l.bounds;
+                Rect sb = new Rect(
+                        Math.round(b.left * scaleX),
+                        Math.round(b.top * scaleY),
+                        Math.round(b.right * scaleX),
+                        Math.round(b.bottom * scaleY));
+                scaled.add(new ScanAccessibilityService.Line(l.text, sb, false));
+            }
+            return scaled;
+        } finally {
+            bmp.recycle();
+        }
+    }
     /**
      * Кеш лаунчера: resolveActivity — это IPC в PackageManager, и звать его
      * каждые 600 мс в poll() незачем. Лаунчер за время сессии не меняется,
@@ -134,6 +218,12 @@ public class OverlayService extends Service {
 
     /** Живой экземпляр сервиса; экран результата берёт из него снапшот. */
     private static OverlayService instance;
+
+    /** Данные разрешения на захват экрана из активити-посредника. */
+    static void deliverVisionGrant(int resultCode, android.content.Intent data) {
+        OverlayService s = instance;
+        if (s != null) s.onVisionGranted(resultCode, data);
+    }
 
     @Override
     public void onCreate() {
@@ -518,6 +608,32 @@ public class OverlayService extends Service {
                     && activePkg.equals(scanningPackage)) {
                 List<ScanAccessibilityService.Line> lines =
                         svc.readScreen(scanningPackage, zone, screenW, screenH, true);
+                /*
+                 * VISION: интерфейсы без текста в дереве доступности
+                 * (canvas, игры, битмапы) отдают ноль строк — для них
+                 * читаем ВЕСЬ экран снимком + OCR. Кадр ограничен по
+                 * частоте (OCR ~0,3-1 с) и идёт в ТОТ ЖЕ конвейер:
+                 * ReadingOrder → накопитель. Отказ от захвата экрана =
+                 * остаёмся на a11y, как раньше.
+                 */
+                if (lines == null || lines.isEmpty()) {
+                    silentPolls++;
+                    if (silentPolls >= 2) {
+                        if (!visionActive && !visionRequested) {
+                            ui.post(this::considerVision);
+                        }
+                        if (visionActive
+                                && System.currentTimeMillis() - lastOcrAt
+                                        >= OCR_MIN_INTERVAL_MS) {
+                            lastOcrAt = System.currentTimeMillis();
+                            List<ScanAccessibilityService.Line> seen =
+                                    visionRead();
+                            if (seen != null) lines = seen;
+                        }
+                    }
+                } else {
+                    silentPolls = 0;
+                }
                 /*
                  * Порядок чтения. Служба доступности обходит дерево по
                  * вложенности элементов, а не сверху вниз — без сортировки
@@ -1031,6 +1147,14 @@ public class OverlayService extends Service {
         }
         scanning = false;
         scanningPackage = null;
+        visionActive = false;
+        visionRequested = false;
+        silentPolls = 0;
+        // Проекция экрана больше не нужна: токен живёт до конца скана,
+        // следующий попросит разрешение заново (правило конфиденциальности
+        // MediaProjection).
+        ui.post(() -> capture.stop());
+        ocr.release();
         // Поколение++: летящие из фонового потока результаты старого
         // скана отбрасываются, новый цикл начнётся со своего номера.
         scanGeneration++;
