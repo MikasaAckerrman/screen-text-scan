@@ -154,12 +154,14 @@ public class OverlayService extends Service {
         android.util.Log.d("ScreenTextScan",
                 "vision: интерфейс молчит для a11y — запрашиваю захват экрана");
         // Android 14+: сервис должен РАБОТАТЬ с типом mediaProjection до
-        // запроса разрешения на захват — поднимаем тип сейчас.
+        // запроса разрешения на захват — поднимаем тип сейчас. Константы
+        // типов живут в android.content.pm.ServiceInfo (сверено по
+        // android.jar 34: в Service и Context их нет).
         if (Build.VERSION.SDK_INT >= 29) {
             try {
                 startForeground(NOTIF_ID, buildNotification(
                                 "Читаю экран распознаванием (для недоступных интерфейсов)"),
-                        android.content.Context.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
             } catch (RuntimeException ignored) {
                 // тип не поднят — захват просто не стартует, a11y остаётся
             }
