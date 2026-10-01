@@ -471,7 +471,11 @@ public class OverlayService extends Service {
             bubbleParams.y = ZoneGeometry.clamp(
                     Math.round(bubbleParams.y * (float) screenH / oldH),
                     0, Math.max(0, screenH - bubbleParams.height));
-            wm.updateViewLayout(bubble, bubbleParams);
+            try {
+                wm.updateViewLayout(bubble, bubbleParams);
+            } catch (IllegalArgumentException ignored) {
+                // Поворот догнал остановку: окно уже снято — не падаем.
+            }
             // Окно касаний следует за окном эффектов: круг один и тот же.
             if (bubbleTouch != null && touchParams != null) {
                 int off = (bubbleParams.width - touchParams.width) / 2;

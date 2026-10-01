@@ -53,6 +53,10 @@ jobs:
           python3 tests/check_launch_flow.py
           python3 tests/check_accessibility_persistence.py
           python3 tests/check_signing_config.py
+          # Классы багов, реально случавшихся в проекте: голые
+          # updateViewLayout/removeView, доступ к полям окна из
+          # touch-слушателя, mediaProjection до согласия и т.д.
+          python3 tests/check_regressions.py
 
       # ---------------------------------------------------------------
       # Проверка чистой логики ДО сборки. Оба проверяемых класса намеренно
