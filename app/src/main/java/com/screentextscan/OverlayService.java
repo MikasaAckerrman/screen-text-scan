@@ -981,6 +981,17 @@ public class OverlayService extends Service {
         stopSelf();
     }
 
+    /**
+     * Пауза на главном экране: шарик и чтение скрыть, накопитель, зону
+     * и привязку сохранить. Не стоп: возврат в приложение продолжит
+     * чтение без потерь.
+     */
+    private void pauseScan() {
+        paused = true;
+        removeBubbleViews();
+        updateNotification("Пауза: вернитесь в приложение — чтение продолжится");
+    }
+
     /** Проверить, является ли пакет домашним экраном (лаунчером). */
     private boolean isLauncherPackage(String pkg) {
         if (pkg == null) return false;
