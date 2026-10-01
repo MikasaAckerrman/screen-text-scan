@@ -159,7 +159,7 @@ public class OverlayService extends Service {
             try {
                 startForeground(NOTIF_ID, buildNotification(
                                 "Читаю экран распознаванием (для недоступных интерфейсов)"),
-                        android.app.Service.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                        android.content.Context.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
             } catch (RuntimeException ignored) {
                 // тип не поднят — захват просто не стартует, a11y остаётся
             }
