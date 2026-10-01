@@ -107,6 +107,10 @@ public class OverlayService extends Service {
     private int screenW, screenH;
     /** Пакет приложения, которое читаем. При смене — останавливаем скан. */
     private volatile String scanningPackage;
+    /** Пакет предыдущего опроса — для проверки устойчивости привязки. */
+    private String lastPkg;
+    /** Сколько опросов подряд виден чужой пакет (гистерезис ухода). */
+    private int foreignPolls;
     /**
      * Кеш лаунчера: resolveActivity — это IPC в PackageManager, и звать его
      * каждые 600 мс в poll() незачем. Лаунчер за время сессии не меняется,
@@ -468,12 +472,13 @@ public class OverlayService extends Service {
         ScanAccessibilityService svc = ScanAccessibilityService.get();
         if (svc != null) {
             activePkg = svc.getActiveWindowPackage();
-            if (activePkg != null) {
+            if (activePkg != null && scanningPackage != null) {
                 /*
                  * Читаем ТОЛЬКО окно приложения, к которому привязан скан
                  * (scanningPackage): правило пользователя — «текст только
-                 * с того приложения, в котором я нахожусь». Первый опрос
-                 * (пакет ещё не привязан) читает активное окно.
+                 * с того приложения, в котором я нахожусь». Пока привязка
+                 * не устоялась (пакет должен повториться два опроса),
+                 * дерево не читаем вовсе.
                  */
                 List<ScanAccessibilityService.Line> lines =
                         svc.readScreen(scanningPackage, zone, screenW, screenH, true);
@@ -517,22 +522,33 @@ public class OverlayService extends Service {
             return;
         } else {
             if (scanningPackage == null) {
-                // Привязка: читаем только это приложение — и все.
-                scanningPackage = currentPkg;
+                /*
+                 * Привязка с УСТОЙЧИВОСТЬЮ: боковые панели (vivo.upslide),
+                 * всплывающие мини-приложения и переходники живут секунду и
+                 * уходят. Запереться на таком — прочитать 15 строк мусора и
+                 * тут же уйти в стоп. Блокируемся только на пакете,
+                 * повторившемся два опроса подряд (~1,2 с).
+                 */
+                if (lastPkg != null && lastPkg.equals(currentPkg)) {
+                    scanningPackage = currentPkg;
+                }
+                lastPkg = currentPkg;
             } else if (!scanningPackage.equals(currentPkg)) {
                 /*
-                 * Пользователь ушёл из приложения — закончить. Раньше скан
-                 * «шёл за ним» по всем приложениям с автокопией на каждом
-                 * переходе: в буфере смешивались чужие экраны. Теперь:
-                 * автокопия накопленного (внутри stopEverything) и стоп.
-                 * Оставаться в приложении считается и нахождение в шторке
-                 * или за клавиатурой — getActiveWindowPackage их пакетом
-                 * не считает.
+                 * Уход тоже с гистерезисом: единичный прыжок (шторка,
+                 * сайдбар, системный диалог) приложением не считается.
+                 * Стоп — только если приложение ДЕЙСТВИТЕЛЬНО сменилось:
+                 * два опроса подряд в другом пакете. Автокопия — в
+                 * stopEverything: текст не пропадает.
                  */
-                stopEverything();
-                return;
+                if (++foreignPolls >= 2) {
+                    stopEverything();
+                    return;
+                }
+            } else {
+                foreignPolls = 0;
             }
-            if (texts != null && !texts.isEmpty()) {
+            if (texts != null && !texts.isEmpty() && scanningPackage != null) {
                 int added = acc.addAll(texts);
                 if (added > 0) {
                     lastNewAt = System.currentTimeMillis();
