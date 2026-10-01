@@ -41,9 +41,7 @@ public final class ScreenCaptureManager {
 
     /** Запросить системное разрешение на захват экрана (один раз за скан). */
     public void requestGrant(Context ctx, Listener l) {
-        MediaProjectionManager mpm = (MediaProjectionManager)
-                ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        VisionGrantActivity.request(ctx, mpm, l);
+        VisionGrantActivity.request(ctx, l);
     }
 
     /** Создать проекцию по данным разрешения. Вызывать на главном потоке. */

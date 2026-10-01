@@ -21,15 +21,13 @@ public class VisionGrantActivity extends Activity {
     private static int pendingRequestCode;
 
     @SuppressLint("StaticFieldLeak") // listener живёт ровно до диалога
-    static void request(Context ctx, MediaProjectionManager mpm,
-                        ScreenCaptureManager.Listener l) {
+    static void request(Context ctx, ScreenCaptureManager.Listener l) {
         listener = l;
         pendingRequestCode = 4242;
         Intent i = new Intent(ctx, VisionGrantActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 .putExtra(EXTRA_REQUEST, 4242);
         ctx.startActivity(i);
-        // Диалог создаётся в onCreate активности ниже.
     }
 
     @Override

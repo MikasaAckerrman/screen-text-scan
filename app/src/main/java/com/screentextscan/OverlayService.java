@@ -165,8 +165,14 @@ public class OverlayService extends Service {
 
     /** Разрешение получено (из VisionGrantActivity через deliverVisionGrant). */
     private void onVisionGranted(int resultCode, android.content.Intent data) {
-        if (!scanning) return;
         ui.post(() -> {
+            /*
+             * Проверка ЗДЕСЬ, внутри post: согласие могло прийти уже после
+             * остановки скана — тогда токен не активируем вовсе, иначе
+             * проекция осталась бы висеть без хозяина (утечка до смерти
+             * процесса).
+             */
+            if (!scanning) return;
             /*
              * ТИП mediaProjection поднимается ЗДЕСЬ — ПОСЛЕ согласия
              * пользователя: только теперь система считает нас владельцем
@@ -212,6 +218,15 @@ public class OverlayService extends Service {
                         Math.round(b.top * scaleY),
                         Math.round(b.right * scaleX),
                         Math.round(b.bottom * scaleY));
+                /*
+                 * ЗОНА — та же семантика, что у обхода дерева: центр слова
+                 * внутри рамки, которую обвёл пользователь. Без этого vision
+                 * читал бы весь экран, игнорируя выбор (рамка «только чат»
+                 * тащила бы и тулбар).
+                 */
+                if (zone != null && !zone.contains(sb.centerX(), sb.centerY())) {
+                    continue;
+                }
                 scaled.add(new ScanAccessibilityService.Line(l.text, sb, false));
             }
             return scaled;
@@ -551,6 +566,19 @@ public class OverlayService extends Service {
         updateNotification(withBubble
                 ? "Читаю. Листайте текст. Зажать=копировать, двойной=закрыть."
                 : "Диагностическое чтение (без интерфейса)");
+        /*
+         * VISION ПЕРВИЧЕН (правило пользователя: «читай просто с экрана —
+         * скриншот без ограничений»): согласие на захват просим СРАЗУ при
+         * старте чтения, один диалог за скан. Согласие дано — источником
+         * истины становится СНИМОК (видимо ровно то, что перед глазами:
+         * ни offscreen-кнопок из дерева, ни слепоты на canvas/Ozon).
+         * Отказ — читаем деревом доступности, как раньше.
+         */
+        if (visionRequested) {
+            visionActive = false;   // прошлый токен мёртв со старым сканом
+        } else {
+            considerVision();
+        }
         startPolling();
     }
 
@@ -630,30 +658,32 @@ public class OverlayService extends Service {
             activePkg = svc.getActiveWindowPackage();
             if (activePkg != null && scanningPackage != null
                     && activePkg.equals(scanningPackage)) {
-                List<ScanAccessibilityService.Line> lines =
-                        svc.readScreen(scanningPackage, zone, screenW, screenH, true);
+                List<ScanAccessibilityService.Line> lines = null;
                 /*
-                 * VISION: интерфейсы без текста в дереве доступности
-                 * (canvas, игры, битмапы) отдают ноль строк — для них
-                 * читаем ВЕСЬ экран снимком + OCR. Кадр ограничен по
-                 * частоте (OCR ~0,3-1 с) и идёт в ТОТ ЖЕ конвейер:
-                 * ReadingOrder → накопитель. Отказ от захвата экрана =
-                 * остаёмся на a11y, как раньше.
+                 * ИСТОЧНИК: при живом vision (согласие на захват) читаем
+                 * ТОЛЬКО снимком — это ровно то, что видит пользователь
+                 * (ни offscreen-мусора из дерева, ни слепоты на canvas).
+                 * Без захвата — дерево доступности (фолбэк).
                  */
-                if (lines == null || lines.isEmpty()) {
+                if (visionActive) {
+                    if (System.currentTimeMillis() - lastOcrAt
+                            >= OCR_MIN_INTERVAL_MS) {
+                        lastOcrAt = System.currentTimeMillis();
+                        List<ScanAccessibilityService.Line> seen = visionRead();
+                        if (seen != null) lines = seen;
+                    }
+                } else {
+                    lines = svc.readScreen(scanningPackage, zone, screenW, screenH, true);
+                }
+                /*
+                 * Фолбэк-триггер: захвата нет, окно молчит два опроса —
+                 * запросить согласие позже (если стартовый диалог не
+                 * отработал).
+                 */
+                if (!visionActive && (lines == null || lines.isEmpty())) {
                     silentPolls++;
-                    if (silentPolls >= 2) {
-                        if (!visionActive && !visionRequested) {
-                            ui.post(this::considerVision);
-                        }
-                        if (visionActive
-                                && System.currentTimeMillis() - lastOcrAt
-                                        >= OCR_MIN_INTERVAL_MS) {
-                            lastOcrAt = System.currentTimeMillis();
-                            List<ScanAccessibilityService.Line> seen =
-                                    visionRead();
-                            if (seen != null) lines = seen;
-                        }
+                    if (silentPolls >= 2 && !visionRequested) {
+                        ui.post(this::considerVision);
                     }
                 } else {
                     silentPolls = 0;
@@ -740,6 +770,15 @@ public class OverlayService extends Service {
                     lastNewAt = System.currentTimeMillis();
                     updateNotification("Читаю " + currentPkg
                             + ". Зажать=копировать, двойной=закрыть.");
+                    /*
+                     * Строки ЭТОГО опроса принадлежат прежнему приложению
+                     * (readScreen шёл по старому пакету). Смешивать их с
+                     * новой эпохой накопителя нельзя — пропускаем цикл
+                     * накопления, первый текст нового приложения придёт
+                     * со следующим опросом.
+                     */
+                    schedulePoll(gen);
+                    return;
                 }
             } else {
                 foreignPolls = 0;
@@ -792,7 +831,9 @@ public class OverlayService extends Service {
          * рисует, касаний не забирает. Оба окна двигаются синхронно.
          */
         bubble = new ScanBubbleView(this);
-        bubble.setCount(0);
+        // Счётчик — текущий накопитель: возврат из паузы не должен
+        // показывать ноль при накопленных строках.
+        bubble.setCount(acc.size());
 
         // Окно эффектов: 200dp, круг 62dp в центре, искры и burst целиком.
         int viewSize = dp(200);

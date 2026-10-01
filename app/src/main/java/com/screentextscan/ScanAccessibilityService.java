@@ -191,6 +191,14 @@ public class ScanAccessibilityService extends AccessibilityService {
         }
     }
 
+    /** Число слов в тексте узла (0 для пустого) — признак «подпись кнопки». */
+    private static int wordCount(CharSequence cs) {
+        if (cs == null) return 0;
+        String t = cs.toString().trim();
+        if (t.isEmpty()) return 0;
+        return t.split("\\s+").length;
+    }
+
     public List<Line> readScreen(String targetPkg, Rect zone, int screenW,
                                  int screenH, boolean includeDesc) {
         List<Line> out = new ArrayList<>();
@@ -398,15 +406,17 @@ public class ScanAccessibilityService extends AccessibilityService {
         if (++visitedNodes > MAX_NODES) return;
 
         /*
-         * ФИЛЬТР КОНТРОЛОВ (корень «скопировал текст, которого не вижу»:
-         * «Копировать», «Нравится», «Новый чат», «Вниз», подсказка ввода).
-         * Текст кнопки — не контент: узел кликабелен, его родитель
-         * кликабелен (подпись внутри кнопки) или это поле ввода (текст
-         * поля — подсказка/набранное). Контент чата и статей этими
-         * флагами не обладает.
+         * ФИЛЬТР КОНТРОЛОВ (фолбэк-путь, без захвата экрана). Первая
+         * версия роняла текст по «родитель кликабелен» — и выкашивала
+         * Ozon целиком: там КАРТОЧКИ — кликабельные контейнеры, текст
+         * внутри. Урок: кликабельность родителя — НЕ признак кнопки.
+         * Отбрасываем только явные кнопки: сам узел кликабелен И текст
+         * короткий (1-2 слова) — подпись кнопки; плюс поля ввода.
+         * (Мусор offscreen-кнопок в основном пути не возникает вовсе:
+         * снимок видит только видимое.)
          */
-        boolean selfControl = node.isClickable() || parentClickable
-                || node.isEditable();
+        boolean selfControl = node.isEditable()
+                || (node.isClickable() && wordCount(node.getText()) <= 2);
 
         /*
          * РЕБИНД-ФИКС (корень «прочитал 5 строк и замолчал»). Кэш
