@@ -208,6 +208,51 @@ public class ScanBubbleView extends View {
         invalidate();
     }
 
+    /**
+     * Полёт шарика в центр экрана — плавная передача окну «Сохранить как
+     * файл» (copy as file). Их карточка появляется в центре и разворачивается
+     * scale 0.92→1 поверх затенения; чтобы переход читался как «шарик стал
+     * карточкой», шарик летит в центр, сжимаясь и растворяясь на том же
+     * хронометраже (~260 мс), с лёгким замедлением на конце.
+     *
+     * Стартовая точка передаётся параметром: позиция окна знает
+     * OverlayService (WindowManager.LayoutParams), а getX() вида меняется
+     * в ходе анимации — считать цель из него нельзя (цель «убегала» бы).
+     *
+     * @param fromScreenCx стартовый экран-центр шарика X
+     * @param fromScreenCy стартовый экран-центр шарика Y
+     * @param toScreenCx   цель (центр экрана) X
+     * @param toScreenCy   цель (центр экрана) Y
+     * @param done         что сделать по прилёту (открыть окно, закрыть скан)
+     */
+    public void flyToCenter(float fromScreenCx, float fromScreenCy,
+                             float toScreenCx, float toScreenCy, Runnable done) {
+        final float dx = toScreenCx - fromScreenCx;
+        final float dy = toScreenCy - fromScreenCy;
+        android.animation.ValueAnimator a = android.animation.ValueAnimator
+                .ofFloat(0f, 1f);
+        a.setDuration(260);
+        a.setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f));
+        a.addUpdateListener(an -> {
+            float t = (float) an.getAnimatedValue();
+            setTranslationX(dx * t);
+            setTranslationY(dy * t);
+            // Сжатие до ~0.5: чуть меньше входного 0.92 их карточки —
+            // смена масштаба читается как «продолжение», а не «разрыв».
+            setScaleX(1f - 0.5f * t);
+            setScaleY(1f - 0.5f * t);
+            // Альфа 0.82→0: наш шарик растворяется ровно на том фоне,
+            // где их скрим проявляется 0→1 — это и есть кроссфейд.
+            setAlpha(0.82f * (1f - t));
+        });
+        a.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator an) {
+                if (done != null) post(done);
+            }
+        });
+        a.start();
+    }
+
     // === ONDRAW ===
     @Override
     protected void onDraw(Canvas c) {

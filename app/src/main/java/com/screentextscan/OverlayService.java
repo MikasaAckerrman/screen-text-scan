@@ -714,7 +714,9 @@ public class OverlayService extends Service {
                                 longPressHandled = true;
                                 fx.cancelLongPressAnim();
                                 vibrate(true);
-                                fx.pop(() -> removeSilently());
+                                // Полёт в центр (сам себе выход-анимация):
+                                // копия, пролёт, окно copy as file.
+                                removeSilently();
                             }
                         };
                         ui.postDelayed(longPressCallback, 2500);
@@ -841,12 +843,14 @@ public class OverlayService extends Service {
     }
 
     /**
-     * Долгое нажатие: СКОПИРОВАТЬ прочитанное и закрыть.
+     * Долгое нажатие: СКОПИРОВАТЬ прочитанное и передать окну «Сохранить
+     * как файл» (copy as file, опенсорсный проект пользователя).
      *
-     * Копия идёт и в буфер обмена, и в «Сохранить как файл» (copy as
-     * file, опенсорсный проект пользователя): появляется окно сохранения
-     * — текст там уже вставлен. Код copy as file не трогаем — только
-     * вызываем его активность.
+     * ПЕРЕХОД: шарик летит в центр экрана (сжимаясь и растворяясь — 260 мс,
+     * замедление к концу), и на месте прилёта их карточка разворачивается
+     * scale 0.92→1 поверх проявляющегося скрима. Наш выход и их вход —
+     * один жест, «шарик стал карточкой». Код copy as file не трогаем —
+     * только вызываем его активность по прилёту.
      */
     private void removeSilently() {
         if (scanning && acc.size() > 0) {
@@ -856,9 +860,24 @@ public class OverlayService extends Service {
             final int kept = acc.keptSize();
             copyToClipboard(text, kept);
             acc.clear();
-            launchSaveAsFile(text);
+            if (bubble != null && bubbleParams != null) {
+                final String fText = text;
+                float fromCx = bubbleParams.x + bubbleParams.width / 2f;
+                float fromCy = bubbleParams.y + bubbleParams.height / 2f;
+                bubble.cancelLongPressAnim();
+                bubble.flyToCenter(fromCx, fromCy,
+                        screenW / 2f, screenH / 2f,
+                        () -> {
+                            launchSaveAsFile(fText);
+                            stopEverything();
+                        });
+            } else {
+                launchSaveAsFile(text);
+                stopEverything();
+            }
+        } else {
+            stopEverything();
         }
-        stopEverything();
     }
 
     /**
