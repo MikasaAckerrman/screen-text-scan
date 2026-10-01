@@ -153,19 +153,13 @@ public class OverlayService extends Service {
         visionRequested = true;
         android.util.Log.d("ScreenTextScan",
                 "vision: интерфейс молчит для a11y — запрашиваю захват экрана");
-        // Android 14+: сервис должен РАБОТАТЬ с типом mediaProjection до
-        // запроса разрешения на захват — поднимаем тип сейчас. Константы
-        // типов живут в android.content.pm.ServiceInfo (сверено по
-        // android.jar 34: в Service и Context их нет).
-        if (Build.VERSION.SDK_INT >= 29) {
-            try {
-                startForeground(NOTIF_ID, buildNotification(
-                                "Читаю экран распознаванием (для недоступных интерфейсов)"),
-                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-            } catch (RuntimeException ignored) {
-                // тип не поднят — захват просто не стартует, a11y остаётся
-            }
-        }
+        /*
+         * ТИП mediaProjection НЕ поднимаем здесь. Vivo/OriginOS проверяет
+         * его ПОЛНОМОЧИЯ в момент startForeground (CAPTURE_VIDEO_OUTPUT /
+         * project_media — выдаются ТОЛЬКО после согласия пользователя) и
+         * валит сервис SecurityException'ом до диалога. Порядок строго
+         * обратный: сначала согласие, потом тип — см. onVisionGranted().
+         */
         capture.requestGrant(this, granted -> { /* доставит deliverVisionGrant */ });
     }
 
@@ -173,6 +167,21 @@ public class OverlayService extends Service {
     private void onVisionGranted(int resultCode, android.content.Intent data) {
         if (!scanning) return;
         ui.post(() -> {
+            /*
+             * ТИП mediaProjection поднимается ЗДЕСЬ — ПОСЛЕ согласия
+             * пользователя: только теперь система считает нас владельцем
+             * project_media, и startForeground с этим типом легален на
+             * Vivo/OriginOS (до согласия он валит сервис сразу).
+             */
+            if (Build.VERSION.SDK_INT >= 29) {
+                try {
+                    startForeground(NOTIF_ID, buildNotification(
+                                    "Читаю экран распознаванием"),
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                } catch (RuntimeException e) {
+                    android.util.Log.d("ScreenTextScan", "vision: тип FGS: " + e);
+                }
+            }
             capture.start(this, resultCode, data);
             visionActive = capture.isReady();
             android.util.Log.d("ScreenTextScan", "vision: active=" + visionActive);
@@ -232,7 +241,21 @@ public class OverlayService extends Service {
         instance = this;
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         readScreenSize();
-        startForeground(NOTIF_ID, buildNotification("Выберите зону чтения"));
+        /*
+         * Тип ЯВНО specialUse. Без этого 2-аргументный startForeground берёт
+         * ВСЕ типы из манифеста (включая mediaProjection) — и Vivo/OriginOS
+         * валит сервис SecurityException'ом ДО согласия пользователя на
+         * захват экрана (краш 01.10 18:31: процесс умирал, служба
+         * доступности помечалась Crashed, плитка уводила в настройки).
+         * mediaProjection поднимается ТОЛЬКО после согласия — в
+         * onVisionGranted().
+         */
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIF_ID, buildNotification("Выберите зону чтения"),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(NOTIF_ID, buildNotification("Выберите зону чтения"));
+        }
     }
 
     /**
