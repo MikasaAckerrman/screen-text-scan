@@ -191,13 +191,6 @@ public class ScanAccessibilityService extends AccessibilityService {
         }
     }
 
-    /** Число слов в тексте узла (0 для пустого) — признак «подпись кнопки». */
-    private static int wordCount(CharSequence cs) {
-        if (cs == null) return 0;
-        String t = cs.toString().trim();
-        if (t.isEmpty()) return 0;
-        return t.split("\\s+").length;
-    }
 
     public List<Line> readScreen(String targetPkg, Rect zone, int screenW,
                                  int screenH, boolean includeDesc) {
@@ -406,17 +399,16 @@ public class ScanAccessibilityService extends AccessibilityService {
         if (++visitedNodes > MAX_NODES) return;
 
         /*
-         * ФИЛЬТР КОНТРОЛОВ (фолбэк-путь, без захвата экрана). Первая
-         * версия роняла текст по «родитель кликабелен» — и выкашивала
-         * Ozon целиком: там КАРТОЧКИ — кликабельные контейнеры, текст
-         * внутри. Урок: кликабельность родителя — НЕ признак кнопки.
-         * Отбрасываем только явные кнопки: сам узел кликабелен И текст
-         * короткий (1-2 слова) — подпись кнопки; плюс поля ввода.
-         * (Мусор offscreen-кнопок в основном пути не возникает вовсе:
-         * снимок видит только видимое.)
+         * ФИЛЬТР КОНТРОЛОВ (путь дерева). Восстановлен сильный вариант:
+         * кликабельный узел, кликабельный родитель (подпись внутри кнопки)
+         * или поле ввода — не контент. Слабый вариант (v1.19) возвращал
+         * шум кнопок «Копировать/Нравится» в чатах. Для приложений, где
+         * контент живёт в кликабельных карточках (Ozon), сильный фильтр
+         * оставляет подозрительно мало строк — и ЭТО сигнал включить
+         * чтение снимком: см. условие lines.size() <= LOW_YIELD в pollBody.
          */
-        boolean selfControl = node.isEditable()
-                || (node.isClickable() && wordCount(node.getText()) <= 2);
+        boolean selfControl = node.isClickable() || parentClickable
+                || node.isEditable();
 
         /*
          * РЕБИНД-ФИКС (корень «прочитал 5 строк и замолчал»). Кэш
