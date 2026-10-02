@@ -299,7 +299,6 @@ public class OverlayService extends Service {
         if (s != null) s.onVisionGranted(resultCode, data);
     }
 
-    @Override
     /** Слушатель выдачи разрешения Shizuku (снимает в onDestroy). */
     private final Shizuku.OnRequestPermissionResultListener grantListener =
             (requestCode, result) -> {
