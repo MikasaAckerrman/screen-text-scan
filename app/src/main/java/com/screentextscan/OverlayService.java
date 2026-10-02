@@ -20,6 +20,8 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+
+import rikka.shizuku.Shizuku;
 import android.widget.Toast;
 
 import java.util.ArrayList;
@@ -158,24 +160,35 @@ public class OverlayService extends Service {
     private void considerVision() {
         if (visionRequested || !scanning) return;
         visionRequested = true;
-        android.util.Log.d("ScreenTextScan",
-                "vision: интерфейс молчит для a11y — запрашиваю захват экрана");
         /*
-         * Авто-подтверждение системного диалога «в каком приложении
-         * снимать/записать» (жалоба 02.10: «максимально неудобно»).
-         * Пользователь уже выразил намерение самим запуском чтения;
-         * повторный выбор — лишний шаг. Вооружаем ДО показа диалога,
-         * живёт 8 секунд, дальше сам disarm.
+         * ПЕРВЫЙ ПУТЬ — Shizuku (screencap из-под shell): системного
+         * диалога НЕ СУЩЕСТВУЕТ в этом механизме. Разрешение Shizuku —
+         * shell-диалог один раз навсегда (и у пользователя Shizuku
+         * поднимается автоматически). Если жив и разрешён — просто
+         * включаем захват, молча.
          */
+        if (ShizukuCapture.isAlive()) {
+            if (ShizukuCapture.isGranted()) {
+                visionActive = true;
+                android.util.Log.d("ScreenTextScan", "vision: активен Shizuku screencap (без диалога)");
+                return;
+            }
+            // Жив, но нашему приложению ещё не разрешено: запросить
+            // (один раз навсегда) и ЖДАТЬ ответа — состояние поднимет
+            // слушатель ниже. Диалога MediaProjection не будет.
+            ui.post(() -> ShizukuCapture.requestPermission());
+            android.util.Log.d("ScreenTextScan", "vision: запрошено разрешение Shizuku (один раз навсегда)");
+            return;
+        }
+        /*
+         * Shizuku мёртв (у пользователя поднимается TCP-сервером, но
+         * на всякий случай) — MediaProjection-фолбэк с авто-кликом:
+         * диалог мелькнёт и подтвердится сам.
+         */
+        android.util.Log.d("ScreenTextScan",
+                "vision: Shizuku недоступен — фолбэк MediaProjection");
         ScanAccessibilityService svc = ScanAccessibilityService.get();
         if (svc != null) svc.armAutoGrant();
-        /*
-         * ТИП mediaProjection НЕ поднимаем здесь. Vivo/OriginOS проверяет
-         * его ПОЛНОМОЧИЯ в момент startForeground (CAPTURE_VIDEO_OUTPUT /
-         * project_media — выдаются ТОЛЬКО после согласия пользователя) и
-         * валит сервис SecurityException'ом до диалога. Порядок строго
-         * обратный: сначала согласие, потом тип — см. onVisionGranted().
-         */
         capture.requestGrant(this, granted -> { /* доставит deliverVisionGrant */ });
     }
 
@@ -217,15 +230,21 @@ public class OverlayService extends Service {
      * конвейер ReadingOrder/зоны считает в экранных координатах.
      */
     private List<ScanAccessibilityService.Line> visionRead() {
-        android.graphics.Bitmap bmp = capture.capture();
+        /*
+         * ИСТОЧНИК: Shizuku screencap (без диалога, основной путь);
+         * MediaProjection+ImageReader — фолбэк, если Shizuku недоступен.
+         */
+        android.graphics.Bitmap bmp = ShizukuCapture.capture();
+        boolean viaShizuku = bmp != null;
+        if (bmp == null) bmp = visionActive ? capture.capture() : null;
         if (bmp == null) return null;
         try {
             /*
              * ОБРЕЗКА ПО ЗОНЕ ДО OCR: распознавать только рамку, которую
-             * обвёл пользователь — в разы быстрее полного экрана (OCR —
-             * главная статья времени кадра), поэтому чаще кадры и меньше
-             * пропущенного при быстром скролле. Координаты зоны —
-             * экранные, масштаб — bmp к экрану.
+             * обвёл пользователь — в разы быстрее полного экрана, кадры
+             * чаще, меньше пропущенного при быстром скролле. У Shizuku-
+             * кадр в НАТИВНОМ разрешении (экранные координаты 1:1); у MP-
+             * фолбэка — половинное, координаты скейлятся ниже.
              */
             android.graphics.Bitmap target = bmp;
             if (zone != null) {
@@ -282,11 +301,30 @@ public class OverlayService extends Service {
     }
 
     @Override
+    /** Слушатель выдачи разрешения Shizuku (снимает в onDestroy). */
+    private final Shizuku.OnRequestPermissionResultListener grantListener =
+            (requestCode, result) -> {
+                if (result == Shizuku.PERMISSION_GRANTED) {
+                    ui.post(() -> {
+                        if (scanning) {
+                            visionActive = true;
+                            android.util.Log.d("ScreenTextScan",
+                                    "vision: разрешение Shizuku выдано — захват активен");
+                        }
+                    });
+                }
+            };
+
     public void onCreate() {
         super.onCreate();
         instance = this;
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         readScreenSize();
+        try {
+            Shizuku.addRequestPermissionResultListener(grantListener);
+        } catch (Throwable ignored) {
+            // Shizuku-классы могут отсутствовать на старых сборках
+        }
         /*
          * Тип ЯВНО specialUse. Без этого 2-аргументный startForeground берёт
          * ВСЕ типы из манифеста (включая mediaProjection) — и Vivo/OriginOS
@@ -698,19 +736,25 @@ public class OverlayService extends Service {
                     && activePkg.equals(scanningPackage)) {
                 List<ScanAccessibilityService.Line> lines = null;
                 /*
-                 * ИСТОЧНИК: при живом vision (согласие на захват) читаем
-                 * ТОЛЬКО снимком — это ровно то, что видит пользователь
-                 * (ни offscreen-мусора из дерева, ни слепоты на canvas).
-                 * Без захвата — дерево доступности (фолбэк).
+                 * ИСТОЧНИК СНИМКА — Shizuku (screencap без диалогов).
+                 * MediaProjection — только фолбэк, когда Shizuku умер.
+                 * При живом захвате читаем ТОЛЬКО снимком: ровно то, что
+                 * видит пользователь (ни offscreen-мусора дерева, ни
+                 * слепоты на canvas). Скролл честен: каждый screencap —
+                 * новый кадр.
                  */
-                if (visionActive) {
-                    if (System.currentTimeMillis() - lastOcrAt
-                            >= OCR_MIN_INTERVAL_MS) {
-                        lastOcrAt = System.currentTimeMillis();
-                        List<ScanAccessibilityService.Line> seen = visionRead();
-                        if (seen != null) lines = seen;
+                boolean shizukuFrame = false;
+                if (visionActive
+                        && System.currentTimeMillis() - lastOcrAt
+                                >= OCR_MIN_INTERVAL_MS) {
+                    lastOcrAt = System.currentTimeMillis();
+                    List<ScanAccessibilityService.Line> seen = visionRead();
+                    if (seen != null) {
+                        lines = seen;
+                        shizukuFrame = true;
                     }
-                } else {
+                }
+                if (!shizukuFrame && !visionActive) {
                     lines = svc.readScreen(scanningPackage, zone, screenW, screenH, true);
                 }
                 /*
@@ -1343,6 +1387,9 @@ public class OverlayService extends Service {
     @Override
     public void onDestroy() {
         instance = null;
+        try {
+            Shizuku.removeRequestPermissionResultListener(grantListener);
+        } catch (Throwable ignored) { }
         scanning = false;
         scanGeneration++;
         ScanAccessibilityService.setScanSubscription(false);

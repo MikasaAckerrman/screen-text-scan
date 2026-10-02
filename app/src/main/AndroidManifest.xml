@@ -2,6 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
+      Видимость пакета Shizuku (Android 11+): без queries bind к сервису
+      Shizuku просто не находит пакет.
+    -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
+    <!--
       РАЗРЕШЕНИЯ И ЗАЧЕМ КАЖДОЕ
 
       SYSTEM_ALERT_WINDOW — единственный способ нарисовать плавающую кнопку
@@ -159,5 +167,18 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Чтение текста с экрана по запросу пользователя" />
         </service>
+
+        <!--
+          Shizuku: провайдер принимает запрос разрешения от приложения-
+          менеджера Shizuku. Выданное разрешение живёт, пока живёт биндер
+          Shizuku (у пользователя — постоянно, поднимается TCP-сервером).
+        -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 </manifest>

@@ -31,7 +31,7 @@ android {
         // База защищает от downgrade даже если workflow когда-нибудь
         // пересоздадут и GITHUB_RUN_NUMBER снова начнётся с единицы.
         versionCode 10_000 + (ciRunNumber ? ciRunNumber.toInteger() : 0)
-        versionName '1.22'
+        versionName '1.23'
     }
 
     signingConfigs {
@@ -102,12 +102,17 @@ dependencies {
     // OCR для vision-режима: чтение ВЕГО экрана, включая интерфейсы,
     // которые не отдают текст дереву доступности (canvas, игры, битмапы).
     // On-device, работает офлайн; языки rus+eng (assets/tessdata, fast).
-    // POM тянет дубль-вариант tesseract4android-openmp с теми же классами
-    // (leptonica/tesseract JNI) — mergeReleaseNativeLibs падает на
-    // дублированных .so. Исключаем openmp: базовый вариант самодостаточен.
     implementation('cz.adaptech:tesseract4android:4.7.0') {
+        // POM тянет дубль-вариант tesseract4android-openmp с теми же классами
+        // (leptonica/tesseract JNI) — mergeReleaseNativeLibs падает на
+        // дублированных .so. Исключаем openmp: базовый вариант самодостаточен.
         exclude group: 'cz.adaptech.tesseract4android', module: 'tesseract4android-openmp'
     }
+    // Shizuku: захват экрана БЕЗ системного диалога согласия (screencap
+    // из-под shell). У пользователя Shizuku поднимается автоматически
+    // (TCP), разрешение приложению — один раз навсегда.
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
 
     /*
      * ПОЧЕМУ ЭТИ ТРИ СТРОКИ ОБЯЗАТЕЛЬНЫ. Без них сборка падает на
