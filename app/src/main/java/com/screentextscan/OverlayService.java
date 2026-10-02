@@ -161,6 +161,15 @@ public class OverlayService extends Service {
         android.util.Log.d("ScreenTextScan",
                 "vision: интерфейс молчит для a11y — запрашиваю захват экрана");
         /*
+         * Авто-подтверждение системного диалога «в каком приложении
+         * снимать/записать» (жалоба 02.10: «максимально неудобно»).
+         * Пользователь уже выразил намерение самим запуском чтения;
+         * повторный выбор — лишний шаг. Вооружаем ДО показа диалога,
+         * живёт 8 секунд, дальше сам disarm.
+         */
+        ScanAccessibilityService svc = ScanAccessibilityService.get();
+        if (svc != null) svc.armAutoGrant();
+        /*
          * ТИП mediaProjection НЕ поднимаем здесь. Vivo/OriginOS проверяет
          * его ПОЛНОМОЧИЯ в момент startForeground (CAPTURE_VIDEO_OUTPUT /
          * project_media — выдаются ТОЛЬКО после согласия пользователя) и

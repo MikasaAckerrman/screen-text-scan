@@ -324,6 +324,31 @@ public class ScanAccessibilityService extends AccessibilityService {
     private volatile String liveForegroundPkg;
     /** Момент последней СМЕНЫ liveForegroundPkg — для оценки устойчивости. */
     private volatile long livePkgSince;
+    /**
+     * Вооружённое авто-подтверждение диалога согласия на захват экрана.
+     * Включается ТОЛЬКО на 8 секунд вокруг НАШЕГО запроса — в любой другой
+     * момент системные диалоги не трогаем вовсе.
+     */
+    private volatile boolean autoGrantArmed;
+    private volatile long autoGrantDeadline;
+    private android.os.Handler mainHandler;
+
+    /**
+     * Вооружить авто-подтверждение (вызывается перед показом системного
+     * диалога согласия). Диалог «в каком приложении снимать/записать» —
+     * самая неудобная точка всего флоу (жалоба 02.10): пользователь уже
+     * ответил «читать этот экран» самим запуском чтения, повторный выбор
+     * — лишний шаг. Служба сама нажмёт «Начать сейчас», как только
+     * диалог появится. Никакого рута не нужно: мы и есть служба
+     * доступности — клик по кнопке диалога это её законное действие.
+     */
+    public void armAutoGrant() {
+        if (mainHandler == null) {
+            mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        }
+        autoGrantArmed = true;
+        autoGrantDeadline = android.os.SystemClock.uptimeMillis() + 8000;
+    }
 
     /**
      * Пакеты-ОВЕРЛЕИ, не являющиеся приложениями пользователя: их события
@@ -352,6 +377,78 @@ public class ScanAccessibilityService extends AccessibilityService {
             liveForegroundPkg = s;
             livePkgSince = android.os.SystemClock.uptimeMillis();
         }
+        /*
+         * Авто-подтверждение диалога согласия на захват: только пока
+         * вооружено (мы сами запросили), только для системных (android)
+         * окон, только с явной кнопкой-разрешением. Лэйаут диалога не
+         * сразу готов — повторные попытки с отсрочкой.
+         */
+        if (autoGrantArmed && t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                && "android".contentEquals(s)) {
+            AccessibilityNodeInfo src = event.getSource();
+            if (src == null) src = getRootInActiveWindow();
+            if (src != null) {
+                mainHandler.postDelayed(new GrantRetry(src), 300);
+            }
+        }
+    }
+
+    /**
+     * Повторные попытки нажать «Начать сейчас». Диалог рисуется
+     * асинхронно: первая попытка может прийти раньше лэйаута.
+     */
+    private class GrantRetry implements Runnable {
+        private final AccessibilityNodeInfo root;
+        private int attempts;
+
+        GrantRetry(AccessibilityNodeInfo root) { this.root = root; }
+
+        @Override
+        public void run() {
+            if (!autoGrantArmed
+                    || android.os.SystemClock.uptimeMillis() > autoGrantDeadline) {
+                return;
+            }
+            if (clickGrantButton(root)) {
+                autoGrantArmed = false;
+                android.util.Log.d("ScreenTextScan", "grant: авто-подтверждение нажато");
+                return;
+            }
+            if (++attempts < 6) {
+                mainHandler.postDelayed(this, 350);
+            }
+        }
+    }
+
+    /**
+     * Одна попытка: найти позитивную кнопку и нажать.
+     * ГВАРДЫ: текст диалога упоминает захват/запись/трансляцию, кнопка —
+     * кликабельный узел с текстом «Начать…»/«Разрешить…». Ничего другого
+     * в системных окнах не трогаем.
+     */
+    private boolean clickGrantButton(AccessibilityNodeInfo root) {
+        return findGrantButton(root, false) != null;
+    }
+
+    private String findGrantButton(AccessibilityNodeInfo node, boolean sawCaptureText) {
+        if (node == null) return null;
+        CharSequence cs = node.getText();
+        String text = cs == null ? "" : cs.toString().trim();
+        if (text.contains("трансля") || text.contains("запис")
+                || text.contains("проекц")) {
+            sawCaptureText = true;
+        }
+        if (sawCaptureText && node.isClickable() && !text.isEmpty()
+                && (text.startsWith("Начать") || text.startsWith("Разрешить"))) {
+            if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return text;
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            String r = findGrantButton(node.getChild(i), sawCaptureText);
+            if (r != null) return r;
+        }
+        return null;
     }
 
     /**
