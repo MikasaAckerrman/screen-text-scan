@@ -168,6 +168,11 @@
                 android:value="Чтение текста с экрана по запросу пользователя" />
         </service>
 
+        <service
+            android:name=".CaptureServiceImpl"
+            android:exported="true"
+            android:process=":shizuku_screencap" />
+
         <!--
           Shizuku: провайдер принимает запрос разрешения от приложения-
           менеджера Shizuku. Выданное разрешение живёт, пока живёт биндер

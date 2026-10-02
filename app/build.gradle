@@ -23,6 +23,12 @@ android {
     namespace 'com.screentextscan'
     compileSdk 34
 
+    // AIDL: интерфейс UserService для Shizuku — screencap с правами shell
+    // выполняется внутри сервера Shizuku (наш форк 13.6).
+    buildFeatures {
+        aidl true
+    }
+
     defaultConfig {
         applicationId 'com.screentextscan'
         minSdk 26          // TileService (плитка быстрых настроек) появилась в API 24,
@@ -31,7 +37,7 @@ android {
         // База защищает от downgrade даже если workflow когда-нибудь
         // пересоздадут и GITHUB_RUN_NUMBER снова начнётся с единицы.
         versionCode 10_000 + (ciRunNumber ? ciRunNumber.toInteger() : 0)
-        versionName '1.23'
+        versionName '1.24'
     }
 
     signingConfigs {

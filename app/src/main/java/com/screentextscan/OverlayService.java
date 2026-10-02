@@ -161,28 +161,28 @@ public class OverlayService extends Service {
         if (visionRequested || !scanning) return;
         visionRequested = true;
         /*
-         * ПЕРВЫЙ ПУТЬ — Shizuku (screencap из-под shell): системного
-         * диалога НЕ СУЩЕСТВУЕТ в этом механизме. Разрешение Shizuku —
-         * shell-диалог один раз навсегда (и у пользователя Shizuku
-         * поднимается автоматически). Если жив и разрешён — просто
-         * включаем захват, молча.
+         * ПЕРВЫЙ ПУТЬ — Shizuku UserService (screencap с правами shell):
+         * системного диалога НЕ СУЩЕСТВУЕТ в этом механизме. Разрешение
+         * Shizuku — shell-диалог один раз навсегда. У пользователя
+         * Shizuku поднимается автоматически (TCP) — считаем живым.
          */
         if (ShizukuCapture.isAlive()) {
             if (ShizukuCapture.isGranted()) {
+                ui.post(() -> ShizukuCapture.bind(this));
                 visionActive = true;
-                android.util.Log.d("ScreenTextScan", "vision: активен Shizuku screencap (без диалога)");
+                android.util.Log.d("ScreenTextScan",
+                        "vision: активен Shizuku screencap (без системного диалога)");
                 return;
             }
-            // Жив, но нашему приложению ещё не разрешено: запросить
-            // (один раз навсегда) и ЖДАТЬ ответа — состояние поднимет
-            // слушатель ниже. Диалога MediaProjection не будет.
+            // Жив, но нашему приложению не разрешено: запросить один раз
+            // навсегда. Ответ поднимет захват (grantListener).
             ui.post(() -> ShizukuCapture.requestPermission());
-            android.util.Log.d("ScreenTextScan", "vision: запрошено разрешение Shizuku (один раз навсегда)");
+            android.util.Log.d("ScreenTextScan",
+                    "vision: запрошено разрешение Shizuku (один раз навсегда)");
             return;
         }
         /*
-         * Shizuku мёртв (у пользователя поднимается TCP-сервером, но
-         * на всякий случай) — MediaProjection-фолбэк с авто-кликом:
+         * Shizuku мёртв — MediaProjection-фолбэк с авто-кликом (v1.22):
          * диалог мелькнёт и подтвердится сам.
          */
         android.util.Log.d("ScreenTextScan",
@@ -231,11 +231,10 @@ public class OverlayService extends Service {
      */
     private List<ScanAccessibilityService.Line> visionRead() {
         /*
-         * ИСТОЧНИК: Shizuku screencap (без диалога, основной путь);
+         * ИСТОЧНИК: Shizuku UserService screencap (без диалога, основной);
          * MediaProjection+ImageReader — фолбэк, если Shizuku недоступен.
          */
-        android.graphics.Bitmap bmp = ShizukuCapture.capture();
-        boolean viaShizuku = bmp != null;
+        android.graphics.Bitmap bmp = ShizukuCapture.capture(this);
         if (bmp == null) bmp = visionActive ? capture.capture() : null;
         if (bmp == null) return null;
         try {
@@ -304,9 +303,12 @@ public class OverlayService extends Service {
     /** Слушатель выдачи разрешения Shizuku (снимает в onDestroy). */
     private final Shizuku.OnRequestPermissionResultListener grantListener =
             (requestCode, result) -> {
-                if (result == Shizuku.PERMISSION_GRANTED) {
+                if (result == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                     ui.post(() -> {
                         if (scanning) {
+                            // Разрешение выдано — поднять UserService и
+                            // включить захват снимками.
+                            ShizukuCapture.bind(this);
                             visionActive = true;
                             android.util.Log.d("ScreenTextScan",
                                     "vision: разрешение Shizuku выдано — захват активен");
@@ -1325,6 +1327,8 @@ public class OverlayService extends Service {
         visionActive = false;
         visionRequested = false;
         silentPolls = 0;
+        // UserService Shizuku больше не нужен — отпустить (кадры не копим).
+        try { ShizukuCapture.unbind(this); } catch (Throwable ignored) { }
         // Проекция экрана больше не нужна: токен живёт до конца скана,
         // следующий попросит разрешение заново (правило конфиденциальности
         // MediaProjection).

@@ -1,42 +1,44 @@
 package com.screentextscan;
 
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Rect;
+import android.os.IBinder;
 
-import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 
 import rikka.shizuku.Shizuku;
 
 /**
- * Снимки экрана через Shizuku (screencap из-под shell) — БЕЗ системного
- * диалога согласия и вообще без MediaProjection.
+ * Снимки экрана через Shizuku UserService (screencap с правами shell) —
+ * БЕЗ системного диалога согласия и без MediaProjection.
  *
- * ПОЧЕМУ ЭТО ЛУЧШЕ. Диалог «в каком приложении снимать/записать» — самая
- * неудобная точка флоу, а Android 15 спрашивает его КАЖДУЮ сессию.
- * screencap из-под shell — законный системный механизм (тот же, что
- * `adb shell screencap`): согласий не существует, тип сервиса
- * mediaProjection не нужен (исчезает и класс крашей Vivo на
- * SecurityException). У пользователя Shizuku живёт постоянно и
- * поднимается TCP-сервером при падении.
+ * МЕХАНИЗМ (форк 13.6, публичный API): bindUserService поднимает наш
+ * CaptureServiceImpl ВНУТРИ сервера Shizuku (uid shell); он исполняет
+ * «screencap -p <файл>» — тот же законный вызов, что «adb shell
+ * screencap». Файл кладётся во внешнее хранилище приложения (доступно
+ * обеим сторонам: shell через FUSE, приложению — как свой каталог),
+ * binder переносит только путь — лимит транзакций не задет.
  *
- * СВЕЖЕСТЬ КАДРА. Каждый снимок — НОВЫЙ процесс: кадр всегда текущий,
- * «замороженный снимок» невозможен по построению (в отличие от
- * MediaProjection-потока, где очередь кадров могла стоять). Скролл
- * читается честно: что на экране в момент снимка — то и в кадре.
+ * СВЕЖЕСТЬ КАДРА. Каждый снимок — новый exec: кадр всегда текущий
+ * (замороженный снимок невозможен по построению), скролл читается
+ * честно.
  *
- * РАЗРЕШЕНИЕ: один раз навсегда — shell-диалог Shizuku «Разрешить
- * ScreenTextScan?» (не системный MediaProjection, не на каждый скан).
- * До разрешения — capture() возвращает null, вызывающий деградирует
- * на MediaProjection-фолбэк.
+ * РАЗРЕШЕНИЕ: один раз навсегда (shell-диалог Shizuku, не системный).
+ * Константы результата — стандартные PackageManager.PERMISSION_*.
  */
 public final class ShizukuCapture {
 
     private static final int PERMISSION_REQUEST = 7701;
 
-    /** Биндер Shizuku жив? (Shizuku запущен — ещё не значит «разрешено».) */
+    private static volatile ICaptureService service;
+    private static ServiceConnection connection;
+
+    /** Биндер Shizuku жив? */
     public static boolean isAlive() {
         try {
             return Shizuku.pingBinder();
@@ -45,62 +47,111 @@ public final class ShizukuCapture {
         }
     }
 
-    /** Разрешение выдано этому приложению? */
+    /** Разрешение выдано этому приложению? (0 = PERMISSION_GRANTED) */
     public static boolean isGranted() {
         try {
-            return isAlive() && Shizuku.checkSelfPermission() == Shizuku.PERMISSION_GRANTED;
+            return isAlive()
+                    && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
         } catch (Throwable t) {
             return false;
         }
     }
 
     /**
-     * Запросить разрешение (один раз навсегда). Диалог Shizuku — не
-     * системный: он показывается приложением-менеджером Shizuku.
+     * Запросить разрешение Shizuku (один раз навсегда, shell-диалог).
      * Вызывать с главного потока.
      */
     public static void requestPermission() {
         try {
-            if (isAlive() && Shizuku.checkSelfPermission() != Shizuku.PERMISSION_GRANTED) {
+            if (isAlive() && Shizuku.checkSelfPermission()
+                    != PackageManager.PERMISSION_GRANTED) {
                 Shizuku.requestPermission(PERMISSION_REQUEST);
             }
         } catch (Throwable ignored) {
-            // биндер умер между проверкой и запросом — фолбэк MP решит
+            // биндер умер между проверкой и запросом — фолбэк решит
         }
     }
 
     /**
-     * Снимок экрана. NULL = Shizuku недоступен/не разрешён/битый кадр —
-     * вызывающий переходит на MediaProjection-фолбэк.
-     *
-     * ВРЕМЯ: screencap ~200-400 мс + PNG-декод ~50 мс. Вызывать только
-     * из фонового потока (у нас — sts-scan).
+     * Поднять UserService (асинхронно: готовность — в capture()).
+     * Вызывать с главного потока (bindService с флагами).
      */
-    public static Bitmap capture() {
-        if (!isGranted()) return null;
-        Process p = null;
+    public static synchronized void bind(Context ctx) {
+        if (service != null || connection != null) return;
         try {
-            // -p: PNG в stdout. Тот же вызов, что adb exec-out screencap.
-            p = Shizuku.newProcess(new String[]{"screencap", "-p"}, null, null);
-            byte[] png = readAll(p.getInputStream());
-            p.waitFor();
-            if (png.length < 100) return null;  // пустой/битый вывод
-            return BitmapFactory.decodeByteArray(png, 0, png.length);
+            Shizuku.UserServiceArgs args = new Shizuku.UserServiceArgs(
+                    new ComponentName(ctx, CaptureServiceImpl.class))
+                    .daemon(false)
+                    .processNameSuffix("screencap")
+                    .version(versionCode(ctx));
+            connection = new ServiceConnection() {
+                @Override
+                public void onServiceConnected(ComponentName name, IBinder binder) {
+                    service = ICaptureService.Stub.asInterface(binder);
+                    android.util.Log.d("ScreenTextScan", "shizuku: UserService подключен");
+                }
+
+                @Override
+                public void onServiceDisconnected(ComponentName name) {
+                    service = null;
+                }
+            };
+            Shizuku.bindUserService(args, connection);
+        } catch (Throwable t) {
+            android.util.Log.d("ScreenTextScan", "shizuku bind: " + t);
+            connection = null;
+        }
+    }
+
+    /** Отпустить UserService (больше кадров не будет). */
+    public static synchronized void unbind(Context ctx) {
+        if (connection == null) return;
+        try {
+            Shizuku.unbindUserService(
+                    new Shizuku.UserServiceArgs(
+                            new ComponentName(ctx, CaptureServiceImpl.class))
+                            .daemon(false)
+                            .processNameSuffix("screencap")
+                            .version(versionCode(ctx)),
+                    connection, true);
+        } catch (Throwable ignored) {
+        }
+        connection = null;
+        service = null;
+    }
+
+    /**
+     * Снимок экрана. NULL = сервис не готов/ошибка — вызывающий
+     * деградирует на MediaProjection-фолбэк. Только из фонового потока.
+     */
+    public static Bitmap capture(Context ctx) {
+        ICaptureService s = service;
+        if (s == null) return null;
+        File f = new File(ctx.getExternalFilesDir(null), "shizuku_cap.png");
+        try {
+            String path = s.screencap(f.getAbsolutePath());
+            if (path == null) return null;
+            Bitmap bmp = BitmapFactory.decodeFile(path);
+            return bmp;
         } catch (Throwable t) {
             android.util.Log.d("ScreenTextScan", "shizuku capture: " + t);
             return null;
         } finally {
-            if (p != null) {
-                try { p.destroy(); } catch (Throwable ignored) { }
-            }
+            f.delete();  // кадр прочитан — файл не копим
         }
     }
 
-    private static byte[] readAll(InputStream in) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream(1 << 20);
-        byte[] buf = new byte[16384];
-        int n;
-        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-        return out.toByteArray();
+    /** UserService готов принимать вызовы? */
+    public static boolean isBound() {
+        return service != null;
+    }
+
+    private static int versionCode(Context ctx) {
+        try {
+            return ctx.getPackageManager()
+                    .getPackageInfo(ctx.getPackageName(), 0).versionCode;
+        } catch (PackageManager.NameNotFoundException e) {
+            return 1;
+        }
     }
 }
