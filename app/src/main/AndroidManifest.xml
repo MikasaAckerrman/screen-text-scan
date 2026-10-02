@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!--
       Видимость пакета Shizuku (Android 11+): без queries bind к сервису
@@ -168,10 +169,16 @@
                 android:value="Чтение текста с экрана по запросу пользователя" />
         </service>
 
+        <!--
+          UserService Shizuku: класс исполняется ВНУТРИ сервера Shizuku
+          (uid shell), а не как сервис Android — поэтому не наследует
+          android.app.Service (ложное срабатывание lint, игнорируем).
+        -->
         <service
             android:name=".CaptureServiceImpl"
             android:exported="true"
-            android:process=":shizuku_screencap" />
+            android:process=":shizuku_screencap"
+            tools:ignore="Instantiatable" />
 
         <!--
           Shizuku: провайдер принимает запрос разрешения от приложения-
