@@ -151,6 +151,8 @@ public class OverlayService extends Service {
      */
     private static final long OCR_MIN_INTERVAL_MS = 600;
     private long lastOcrAt;
+    /** Пустые захваты Shizuku подряд — 3 = уходим на MediaProjection. */
+    private int shizukuFails;
 
     /**
      * Окно молчит несколько опросов — включить чтение экрана снимками.
@@ -235,7 +237,25 @@ public class OverlayService extends Service {
          * MediaProjection+ImageReader — фолбэк, если Shizuku недоступен.
          */
         android.graphics.Bitmap bmp = ShizukuCapture.capture(this);
-        if (bmp == null) bmp = visionActive ? capture.capture() : null;
+        if (bmp == null) {
+            /*
+             * Подстраховка связки:UserService может не подняться (старый
+             * сервер, битый AIDL) — 3 пустых захвата подряд, и уходим на
+             * MediaProjection-фолбэк с автокликом, чтобы скан не молчал.
+             */
+            if (++shizukuFails >= 3) {
+                shizukuFails = 0;
+                android.util.Log.d("ScreenTextScan",
+                        "vision: Shizuku не поднимается — фолбэк MediaProjection");
+                ScanAccessibilityService svc = ScanAccessibilityService.get();
+                if (svc != null) svc.armAutoGrant();
+                capture.requestGrant(this, granted -> { });
+                return null;
+            }
+            bmp = visionActive ? capture.capture() : null;
+        } else {
+            shizukuFails = 0;
+        }
         if (bmp == null) return null;
         try {
             /*
