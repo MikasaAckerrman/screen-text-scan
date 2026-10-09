@@ -697,6 +697,10 @@ public class OverlayService extends Service {
          * минимальная подписка, чтобы не будить процесс круглосуточно.
          */
         ScanAccessibilityService.setScanSubscription(true);
+        // Посев трекера: окно могло не меняться с привязки службы — без
+        // этого poll вечно видит «pkg=none» и чтение не начинается.
+        ScanAccessibilityService svc = ScanAccessibilityService.get();
+        if (svc != null) svc.seedForeground();
         firstPoll = true;
         schedulePoll(++scanGeneration);
     }

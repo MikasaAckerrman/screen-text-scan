@@ -496,6 +496,29 @@ public class ScanAccessibilityService extends AccessibilityService {
         return false;
     }
 
+    /**
+     * Посеять текущее приложение, если трекер пуст.
+     *
+     * НАЙДЕНО ЖИВЫМ ТЕСТОМ 09.10: после (пере)привязки службы трекер знает
+     * только события — а если окно НЕ менялось с момента привязки, он
+     * навсегда пуст, и poll вечно видит «pkg=none»: скан запущен, но
+     * никогда не начнёт читать («включаю — а оно ничего не читает»).
+     * Посев берёт активное окно СИСТЕМЫ (после привязки оно свежее —
+     * ложь возможна только на часовом простое без событий).
+     */
+    public void seedForeground() {
+        if (liveForegroundPkg != null) return;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return;
+        CharSequence p = root.getPackageName();
+        if (p == null) return;
+        String s = p.toString();
+        if (s.equals(getPackageName()) || OVERLAY_PKGS.contains(s)) return;
+        liveForegroundPkg = s;
+        livePkgSince = android.os.SystemClock.uptimeMillis();
+        android.util.Log.d("ScreenTextScan", "tracker: посев " + s);
+    }
+
     public String getActiveWindowPackage() {
         return liveForegroundPkg;
     }
