@@ -39,13 +39,18 @@ public final class RootCapture {
         int s = suState;
         if (s != 0) return s == 1;
         try {
+            long t0 = android.os.SystemClock.elapsedRealtime();
             Process p = Runtime.getRuntime().exec(
                     new String[]{"su", "-c", "id"});
             boolean ok = p.waitFor() == 0;
             suState = ok ? 1 : -1;
+            android.util.Log.d("ScreenTextScan",
+                    "root: su -c id → " + ok + " за "
+                            + (android.os.SystemClock.elapsedRealtime() - t0) + "мс");
             return ok;
         } catch (Throwable t) {
             suState = -1;
+            android.util.Log.d("ScreenTextScan", "root: su exec: " + t);
             return false;
         }
     }

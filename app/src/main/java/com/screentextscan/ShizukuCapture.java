@@ -77,7 +77,11 @@ public final class ShizukuCapture {
      * Вызывать с главного потока (bindService с флагами).
      */
     public static synchronized void bind(Context ctx) {
-        if (service != null || connection != null) return;
+        if (service != null || connection != null) {
+            android.util.Log.d("ScreenTextScan",
+                    "shizuku bind: уже " + (service != null ? "подключен" : "в процессе"));
+            return;
+        }
         try {
             Shizuku.UserServiceArgs args = new Shizuku.UserServiceArgs(
                     new ComponentName(ctx, CaptureServiceImpl.class))
@@ -94,9 +98,13 @@ public final class ShizukuCapture {
                 @Override
                 public void onServiceDisconnected(ComponentName name) {
                     service = null;
+                    android.util.Log.d("ScreenTextScan", "shizuku: UserService отключен");
                 }
             };
             Shizuku.bindUserService(args, connection);
+            android.util.Log.d("ScreenTextScan",
+                    "shizuku bind: запрос отправлен (alive=" + isAlive()
+                            + " granted=" + isGranted() + ")");
         } catch (Throwable t) {
             android.util.Log.d("ScreenTextScan", "shizuku bind: " + t);
             connection = null;
