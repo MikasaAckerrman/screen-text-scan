@@ -35,6 +35,18 @@ public class CaptureServiceImpl extends ICaptureService.Stub {
     }
 
     @Override
+    public String exec(String cmd) {
+        try {
+            Process p = Runtime.getRuntime().exec(
+                    new String[]{"sh", "-c", cmd});
+            p.waitFor();
+            return "ok";
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    @Override
     public void destroy() {
         // Ничего не держим: процессы одноразовые.
     }

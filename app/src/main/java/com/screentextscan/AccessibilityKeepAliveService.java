@@ -28,10 +28,44 @@ public class AccessibilityKeepAliveService extends Service {
     private static final long CHECK_INTERVAL_MS = 60_000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    /**
+     * САМОЛЕЧЕНИЕ ПОСЛЕ ЗАГРУЗКИ (правило 09.10: «после перезагрузки
+     * разрешение слетает»). OriginOS сбрасывает строку доступности;
+     * KeepAliveReceiver стартует нас на BOOT_COMPLETED — через 12 с
+     * (настройки системы оседают) восстанавливаем всё через
+     * RootSelfGrant: прямая запись (WRITE_SECURE_SETTINGS, выдан
+     * навсегда) → su (KernelSU) → Shizuku exec (сервер юзера всегда
+     * поднимается сам). Ретраи: не вышло — через 30 с, до 5 попыток.
+     */
+    private final Runnable bootHeal = new Runnable() {
+        private int attempts;
+
+        @Override
+        public void run() {
+            new Thread(() -> {
+                boolean ok;
+                try {
+                    ok = RootSelfGrant.ensureAll(AccessibilityKeepAliveService.this);
+                } catch (Throwable t) {
+                    ok = false;
+                }
+                final boolean fine = ok;
+                handler.post(() -> {
+                    if (fine || ++attempts >= 5) {
+                        android.util.Log.d("ScreenTextScan",
+                                "boot-heal: " + (fine ? "ок" : "не вышло, попыток " + attempts));
+                        return;
+                    }
+                    handler.postDelayed(this, 30_000);
+                });
+            }, "sts-boot-heal").start();
+        }
+    };
     private final Runnable permissionCheck = new Runnable() {
         @Override
         public void run() {
-            if (!accessibilityEnabled()) {
+            // Пока boot-heal работает — живём: он вернёт доступность.
+            if (!healScheduled && !accessibilityEnabled()) {
                 stopForeground(STOP_FOREGROUND_REMOVE);
                 stopSelf();
                 return;
@@ -41,11 +75,12 @@ public class AccessibilityKeepAliveService extends Service {
     };
 
     public static void start(Context context) {
-        if (!Permissions.isAccessibilityMasterOn(context)
-                || !Permissions.isAccessibilityEnabled(context)) return;
+        // Загрузка/обновление: самолечение важнее «уже включено?» —
+        // стартуем ДАЖЕ если строка слетела (boot-heal вернёт её).
         try {
             context.startForegroundService(new Intent(
-                    context, AccessibilityKeepAliveService.class));
+                    context, AccessibilityKeepAliveService.class)
+                    .putExtra("heal", true));
         } catch (RuntimeException ignored) {
             // Force-stop и некоторые OEM background-start запреты обязательны
             // для приложений. Следующий видимый запуск попробует снова.
@@ -55,10 +90,12 @@ public class AccessibilityKeepAliveService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        if (!accessibilityEnabled()) {
-            stopSelf();
-            return;
-        }
+        /*
+         * Не выходим при выключенной доступности: интент с heal
+         * приходит в onStartCommand ПОСЛЕ onCreate — на загрузке это
+         * единственный путь восстановления. Останов — в onStartCommand
+         * и permissionCheck, когда heal не активен.
+         */
         Notification n = buildNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // Android 14+: specialUse-сервис БЕЗ типа бросает
@@ -72,12 +109,27 @@ public class AccessibilityKeepAliveService extends Service {
         handler.postDelayed(permissionCheck, CHECK_INTERVAL_MS);
     }
 
+    private boolean pendingHeal;
+    private boolean healScheduled;
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!accessibilityEnabled()) {
+        if (intent != null && intent.getBooleanExtra("heal", false)) {
+            pendingHeal = true;
+        }
+        if (!pendingHeal && !accessibilityEnabled()) {
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
+        }
+        if (pendingHeal && !healScheduled) {
+            healScheduled = true;
+            /*
+             * 12 секунд: системные настройки оседают после загрузки
+             * не мгновенно; раньше — heal писал бы строку, которую
+             * OriginOS тут же перезатирал бы своей инициализацией.
+             */
+            handler.postDelayed(bootHeal, 12_000);
         }
         return START_STICKY;
     }

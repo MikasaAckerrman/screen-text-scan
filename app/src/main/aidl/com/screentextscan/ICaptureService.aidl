@@ -5,11 +5,18 @@ package com.screentextscan;
 
 interface ICaptureService {
     /**
-     * Снимок экрана в PNG-файл по указанному пути.
-     * Путь — внешнее хранилище приложения (доступно shell через FUSE).
+     * Снимок экрана в RAW-файл по указанному пути (без PNG: кодирование
+     * PNG стоило 300-400 мс CPU на кадр).
      * @return переданный путь или null при ошибке.
      */
     String screencap(String path);
+
+    /**
+     * Выполнить shell-команду внутри сервера Shizuku (uid shell).
+     * Для самолечения разрешений после загрузки: shell имеет
+     * WRITE_SECURE_SETTINGS и appops. @return stdout или null.
+     */
+    String exec(String cmd);
 
     void destroy();
 }

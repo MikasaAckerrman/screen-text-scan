@@ -155,6 +155,23 @@ public final class ShizukuCapture {
         }
     }
 
+    /**
+     * Выполнить shell-команду в сервере Shizuku (uid shell: есть
+     * WRITE_SECURE_SETTINGS и appops). Используется самолечением
+     * разрешений после загрузки, когда su недоступен.
+     *
+     * @return "ok" или null (сервис не поднят/ошибка).
+     */
+    public static String exec(String cmd) {
+        ICaptureService s = service;
+        if (s == null) return null;
+        try {
+            return s.exec(cmd);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** UserService готов принимать вызовы? */
     public static boolean isBound() {
         return service != null;
