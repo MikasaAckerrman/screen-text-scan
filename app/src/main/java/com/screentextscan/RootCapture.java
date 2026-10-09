@@ -56,6 +56,21 @@ public final class RootCapture {
     }
 
     /**
+     * Выполнить составную shell-команду от root (для RootSelfGrant:
+     * несколько команд одной su-сессией). Возвращает успех/провал.
+     */
+    static boolean execRaw(String cmd) {
+        try {
+            Process p = Runtime.getRuntime().exec(
+                    new String[]{"su", "-c", cmd});
+            return p.waitFor() == 0;
+        } catch (Throwable t) {
+            android.util.Log.d("ScreenTextScan", "root exec: " + t);
+            return false;
+        }
+    }
+
+    /**
      * Снимок экрана. NULL = root недоступен/битый кадр — вызывающий
      * остаётся на предыдущем источнике. Только из фонового потока.
      */

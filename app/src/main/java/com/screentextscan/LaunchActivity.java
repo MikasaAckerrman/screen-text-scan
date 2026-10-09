@@ -27,6 +27,20 @@ public class LaunchActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
 
+        /*
+         * АВТО-ВЫДАЧА РАЗРЕШЕНИЙ ЧЕРЕЗ ROOT (правило пользователя 09.10:
+         * «при нажатии все разрешения выдавались автоматически, чтобы не
+         * приходилось заходить в настройки приложения»). KernelSU-грант
+         * у приложения уже есть (su монтируется в namespace) — чиним всё
+         * остальное молча: уведомления, оверлей, доступность. Быстрая
+         * su-сессия (~50-300 мс с кешем). Без рута — прежнее поведение.
+         */
+        try {
+            RootSelfGrant.ensureAll(this);
+        } catch (Throwable t) {
+            android.util.Log.d("ScreenTextScan", "selfgrant: " + t);
+        }
+
         boolean canOverlay = Permissions.canOverlay(this);
         boolean a11yMaster = Permissions.isAccessibilityMasterOn(this);
         boolean a11y = Permissions.isAccessibilityEnabled(this);
@@ -36,7 +50,8 @@ public class LaunchActivity extends Activity {
                         + " master=" + a11yMaster + " a11y=" + a11y);
 
         if (!ready) {
-            // Разрешений нет — показываем экран статуса (без авто-редиректа).
+            // Разрешений нет даже после авто-гранта (root не выдан) —
+            // экран статуса с кнопками, как раньше.
             startActivity(new Intent(this, MainActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             finish();
