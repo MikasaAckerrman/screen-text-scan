@@ -147,13 +147,62 @@ public class OverlayService extends Service {
      * включаем чтение снимком.
      */
     private static final int LOW_YIELD = 4;
-    /** Минимальная пауза между OCR-кадрами (мс): с обрезкой по зоне
-     * кадр распознаётся за десятки-сотни мс, 600 мс покрывает скролл.
+    /**
+     * АДАПТИВНЫЙ ШЕДУЛЕР (скорость 09.10): раньше задержка 600 мс
+     * ложилась ПОВЕРХ обработки (PNG+OCR ~1,6 с) — цикл 2,2 с. Теперь
+     * задержка = floor − фактическое время цикла: чтение идёт
+     * максимально плотно, пауза остаётся только при простое.
      */
-    private static final long OCR_MIN_INTERVAL_MS = 600;
-    private long lastOcrAt;
+    private static final long A11Y_CYCLE_FLOOR_MS = 350;
+    private static final long VISION_CYCLE_FLOOR_MS = 450;
+    /** Момент старта текущего цикла — для адаптивной задержки. */
+    private long cycleStartAt;
     /** Пустые захваты Shizuku подряд — 3 = лог и перепривязка бинда. */
     private int shizukuFails;
+
+    /* ================================================================
+       Автоскролл: прокрутка содержимого под рамкой синхронно с темпом
+       чтения. Свайп — root'ом (input swipe), вылетает только после
+       прочитанного кадра; перекрытие 20% — строки на границе кадров
+       не теряются. Дно списка (8 свайпов без нового текста) — стоп
+       прокрутки, чтение продолжается.
+       ================================================================ */
+    private volatile int autoScrollDir;
+    private int autoScrollIdleSteps;
+    private volatile boolean swipeInFlight;
+
+    /**
+     * Один шаг автопрокрутки. Свайп в ЛЕВОЙ четверти рамки — правый
+     * край занимает плавающий кружок, его окно перехватило бы жест.
+     */
+    private void doAutoSwipe() {
+        if (swipeInFlight || autoScrollDir == 0) return;
+        Rect r = zone != null ? new Rect(zone)
+                : new Rect(0, 0, screenW, screenH);
+        int x = r.left + r.width() / 4;
+        // 80% высоты: 20% перекрытия страхуют строки на стыке кадров.
+        int span = r.height() * 8 / 10;
+        int yFrom, yTo;
+        if (autoScrollDir > 0) {
+            // Читаем дальше (вниз): палец движется вверх.
+            yFrom = r.bottom - r.height() / 10;
+            yTo = yFrom - span;
+        } else {
+            yFrom = r.top + r.height() / 10;
+            yTo = yFrom + span;
+        }
+        swipeInFlight = true;
+        new Thread(() -> {
+            try {
+                // 220 мс — плавный свайп: резкий дёргает списки с
+                // инерцией и кадр размывается прокруткой.
+                RootCapture.execRaw("input swipe " + x + " " + yFrom
+                        + " " + x + " " + yTo + " 220");
+            } finally {
+                swipeInFlight = false;
+            }
+        }, "sts-swipe").start();
+    }
 
     /**
      * Окно молчит несколько опросов — включить чтение экрана снимками.
@@ -238,13 +287,23 @@ public class OverlayService extends Service {
         if (bmp == null) return null;
         try {
             /*
-             * ОБРЕЗКА ПО ЗОНЕ ДО OCR: распознавать только рамку, которую
-             * обвёл пользователь — в разы быстрее полного экрана, кадры
-             * чаще, меньше пропущенного при быстром скролле. У Shizuku-
-             * кадр в НАТИВНОМ разрешении (экранные координаты 1:1); у MP-
-             * фолбэка — половинное, координаты скейлятся ниже.
+             * ОБРЕЗКА ПО ЗОНЕ ДО OCR + ДАУНСКЕЙЛ: OCR — главная статья
+             * времени кадра, его стоимость ~число пикселей. Правила:
+             *  - есть зона → распознаём только её (нативное разрешение);
+             *  - зоны нет (весь экран) → даунскейл вдвое: 1260×2800 →
+             *    630×1400 = вчетверо меньше пикселей, ~в 3 раза быстрее
+             *    распознавания (текст интерфейсов крупный, /2 читается);
+             *  - зона больше трети экрана → тоже даунскейл вдвое.
+             * Координаты скейлятся ниже (scaleX/scaleY) — см. mapping.
              */
             android.graphics.Bitmap target = bmp;
+            /*
+             * Кроп-смещение в КООРДИНАТАХ bmp: для обратного маппинга
+             * OCR-границ в экранные (баг, найденный построчным разбором:
+             * без смещения zone-фильтр сравнивал координаты кропа
+             * с экранными — строки ошибочно отбрасывались/терялись).
+             */
+            int cropX = 0, cropY = 0;
             if (zone != null) {
                 float sx = (float) bmp.getWidth() / screenW;
                 float sy = (float) bmp.getHeight() / screenH;
@@ -254,30 +313,50 @@ public class OverlayService extends Service {
                 int b = Math.min(bmp.getHeight(), Math.round(zone.bottom * sy));
                 if (r - l >= 8 && b - t >= 8) {
                     target = android.graphics.Bitmap.createBitmap(bmp, l, t, r - l, b - t);
+                    cropX = l;
+                    cropY = t;
+                }
+            }
+            long area = (long) target.getWidth() * target.getHeight();
+            long full = (long) bmp.getWidth() * bmp.getHeight();
+            int fullTW = target.getWidth(), fullTH = target.getHeight();
+            if (area * 3 >= full || zone == null) {
+                android.graphics.Bitmap half = android.graphics.Bitmap.createScaledBitmap(
+                        target, Math.max(1, target.getWidth() / 2),
+                        Math.max(1, target.getHeight() / 2), true);
+                if (half != target && half != null) {
+                    if (target != bmp) target.recycle();
+                    target = half;
                 }
             }
             ocr.ensureInit(this);
             List<ScanAccessibilityService.Line> raw = ocr.recognize(target);
             if (target != bmp) target.recycle();
             if (raw.isEmpty()) return raw;
-            float scaleX = (float) screenW / bmp.getWidth();
-            float scaleY = (float) screenH / bmp.getHeight();
-            List<ScanAccessibilityService.Line> scaled =
+            /*
+             * МАППИНГ КООРДИНАТ (полная цепочка): OCR-границы даны
+             * в координатах финального target (кроп+downscale).
+             * Обратно: target → полный target (× fullW/targetW) →
+             * bmp (+cropX) → экран (× screenW/bmpW).
+             */
+            float kFinalToFull = (float) fullTW / target.getWidth();
+            float kBmpToScreen = (float) screenW / bmp.getWidth();
+            List<ScanAccessibilityService.Line> scaledOut =
                     new ArrayList<>(raw.size());
             for (ScanAccessibilityService.Line l : raw) {
                 Rect b = l.bounds;
-                Rect sb = new Rect(
-                        Math.round(b.left * scaleX),
-                        Math.round(b.top * scaleY),
-                        Math.round(b.right * scaleX),
-                        Math.round(b.bottom * scaleY));
+                int L = Math.round((cropX + b.left * kFinalToFull) * kBmpToScreen);
+                int T = Math.round((cropY + b.top * kFinalToFull) * kBmpToScreen);
+                int R = Math.round((cropX + b.right * kFinalToFull) * kBmpToScreen);
+                int B = Math.round((cropY + b.bottom * kFinalToFull) * kBmpToScreen);
+                Rect sb = new Rect(L, T, R, B);
                 // Зона (та же семантика, что у дерева): центр слова в рамке.
                 if (zone != null && !zone.contains(sb.centerX(), sb.centerY())) {
                     continue;
                 }
-                scaled.add(new ScanAccessibilityService.Line(l.text, sb, false));
+                scaledOut.add(new ScanAccessibilityService.Line(l.text, sb, false));
             }
-            return scaled;
+            return scaledOut;
         } finally {
             bmp.recycle();
         }
@@ -607,6 +686,32 @@ public class OverlayService extends Service {
             }
 
             @Override
+            public void onAutoScroll(int dir) {
+                /*
+                 * АВТОСКРОЛЛ (правило 09.10: «кнопка автоскрола, вниз
+                 * или вверх, с темпом максимально быстрым, с которым
+                 * можешь читать ничего не пропуская»). Зона — текущая
+                 * рамка (или весь экран). Темп задаёт сканер: свайп
+                 * выполняется ТОЛЬКО когда кадр прочитан (два опроса без
+                 * нового текста) — строки не пропускаются, скорость
+                 * следует за фактическим темпом чтения.
+                 */
+                autoScrollDir = dir;
+                if (zone == null) {
+                    // Без рамки — весь экран.
+                    removeZoneView();
+                    startScanning();
+                } else {
+                    ZonePrefs.save(OverlayService.this, zone, screenW, screenH);
+                    removeZoneView();
+                    startScanning();
+                }
+                updateNotification(dir > 0
+                        ? "Автоскролл ↓. Листаю и читаю. Зажать=сохранить."
+                        : "Автоскролл ↑. Листаю и читаю. Зажать=сохранить.");
+            }
+
+            @Override
             public void onCancel() {
                 stopEverything();
             }
@@ -680,9 +785,8 @@ public class OverlayService extends Service {
      * привязан — часто (250 мс), после привязки — 600 мс: «начинает
      * читать только через несколько секунд» лечится здесь.
      */
-    private void schedulePoll(final int gen) {
+    private void schedulePoll(final int gen, long delay) {
         if (!scanning || gen != scanGeneration) return;
-        long delay = firstPoll ? 0 : (scanningPackage == null ? PRE_LOCK_MS : POLL_MS);
         ui.postDelayed(() -> {
             /*
              * ГОНКА ОСТАНОВКИ (краш 09.10 12:28/12:43, «не работает вообще»):
@@ -718,7 +822,7 @@ public class OverlayService extends Service {
         ScanAccessibilityService svc = ScanAccessibilityService.get();
         if (svc != null) svc.seedForeground();
         firstPoll = true;
-        schedulePoll(++scanGeneration);
+        schedulePoll(++scanGeneration, 0);
     }
 
     /**
@@ -728,6 +832,7 @@ public class OverlayService extends Service {
     private void pollBody(final int gen) {
         if (!scanning || gen != scanGeneration) return;
         firstPoll = false;
+        cycleStartAt = android.os.SystemClock.uptimeMillis();
         String activePkg = null;
         List<String> texts = null;
         ScanAccessibilityService svc = ScanAccessibilityService.get();
@@ -757,25 +862,22 @@ public class OverlayService extends Service {
                     && activePkg.equals(scanningPackage)) {
                 List<ScanAccessibilityService.Line> lines = null;
                 /*
-                 * ИСТОЧНИК СНИМКА — Shizuku (screencap без диалогов).
-                 * ROOT (su) — вторая линия, когда Shizuku умер.
-                 * При живом захвате читаем ТОЛЬКО снимком: ровно то, что
-                 * видит пользователь (ни offscreen-мусора дерева, ни
-                 * слепоты на canvas). Скролл честен: каждый screencap —
-                 * новый кадр.
+                 * ИСТОЧНИК СНИМКА — Shizuku (raw screencap без PNG) →
+                 * ROOT su (raw). При живом захвате читаем ТОЛЬКО
+                 * снимком: ровно то, что видит пользователь. Скролл
+                 * честен: каждый screencap — новый exec.
+                 * Интервал задаёт адаптивный шедулер (цикл и есть
+                 * интервал), отдельный gate не нужен.
                  */
-                boolean shizukuFrame = false;
-                if (visionActive
-                        && System.currentTimeMillis() - lastOcrAt
-                                >= OCR_MIN_INTERVAL_MS) {
-                    lastOcrAt = System.currentTimeMillis();
+                if (visionActive) {
                     List<ScanAccessibilityService.Line> seen = visionRead();
                     if (seen != null) {
                         lines = seen;
-                        shizukuFrame = true;
                     }
                 }
-                if (!shizukuFrame && !visionActive) {
+                if (!visionActive) {
+                    // Дерево доступности: основной путь для «говорящих»
+                    // приложений (чаты, ленты) — снимок не нужен.
                     lines = svc.readScreen(scanningPackage, zone, screenW, screenH, true);
                 }
                 /*
@@ -848,7 +950,7 @@ public class OverlayService extends Service {
              * пропадает, когда захожу на главный экран»).
              */
             if (!paused) pauseScan();
-            schedulePoll(gen);
+            schedulePoll(gen, PRE_LOCK_MS);
             return;
         } else {
             if (paused) {
@@ -892,18 +994,38 @@ public class OverlayService extends Service {
                      * накопления, первый текст нового приложения придёт
                      * со следующим опросом.
                      */
-                    schedulePoll(gen);
+                    schedulePoll(gen, POLL_MS);
                     return;
                 }
             } else {
                 foreignPolls = 0;
             }
+            int added = 0;
             if (texts != null && !texts.isEmpty() && scanningPackage != null) {
-                int added = acc.addAll(texts);
+                added = acc.addAll(texts);
                 if (added > 0) {
                     lastNewAt = System.currentTimeMillis();
                     // Визуальный эффект всасывания — частицы стягиваются к кругу.
                     if (bubble != null) bubble.pulseNewText();
+                }
+            }
+
+            /*
+             * АВТОСКРОЛЛ-ТРИГГЕР: свайп только когда кадр прочитан
+             * (два цикла без нового текста) — темп задаёт читатель.
+             * 8 свайпов подряд без нового текста = конец списка:
+             * прокрутка стопится, чтение продолжается.
+             */
+            if (autoScrollDir != 0) {
+                if (added > 0) {
+                    autoScrollIdleSteps = 0;
+                } else if (++autoScrollIdleSteps >= 2) {
+                    if (autoScrollIdleSteps >= 8) {
+                        autoScrollDir = 0;
+                        updateNotification("Автоскролл: конец списка. Читаю дальше.");
+                    } else {
+                        doAutoSwipe();
+                    }
                 }
             }
         }
@@ -928,7 +1050,17 @@ public class OverlayService extends Service {
             stopEverything();
             return;
         }
-        schedulePoll(gen);
+        /*
+         * АДАПТИВНАЯ ЗАДЕРЖКА: floor минус фактическое время цикла.
+         * Обработка (кадр+OCR) уже потратила свои мс — палить их
+         * второй раз фиксированной паузой не нужно (было: 600 мс поверх
+         * ~1,6 с обработки = цикл 2,2 с; замер 09.10).
+         */
+        long floor = visionActive ? VISION_CYCLE_FLOOR_MS : A11Y_CYCLE_FLOOR_MS;
+        long elapsed = android.os.SystemClock.uptimeMillis() - cycleStartAt;
+        long delay = Math.max(0, floor - elapsed);
+        if (scanningPackage == null && !firstPoll) delay = Math.min(delay, PRE_LOCK_MS);
+        schedulePoll(gen, delay);
     }
 
     private void showBubble() {

@@ -17,10 +17,16 @@ public class CaptureServiceImpl extends ICaptureService.Stub {
         try {
             // Убрать прошлый кадр: screencap не перезаписывает атомарно.
             new File(path).delete();
+            /*
+             * БЕЗ «-p»: RAW RGBA вместо PNG. PNG-кодирование стоило
+             * 300-400 мс CPU на кадр (замер 09.10: цикл чтения 2,2 с) —
+             * raw-файл пишется последовательной записью (~50-80 мс на
+             * UFS), а приложение читает пиксели напрямую в Bitmap.
+             * Формат файла: 12 байт заголовка (w, h, format) + w*h*4
+             * байт RGBA_8888.
+             */
             Process p = Runtime.getRuntime().exec(
-                    new String[]{"screencap", "-p", path});
-            // screencap быстрый (~250 мс), но ждать обязаны: файл должен
-            // быть готов к чтению.
+                    new String[]{"screencap", path});
             p.waitFor();
             return new File(path).exists() ? path : null;
         } catch (Throwable t) {

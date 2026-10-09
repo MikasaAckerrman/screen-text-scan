@@ -33,6 +33,14 @@ public class ZoneSelectorView extends View {
 
         void onAutoZone();
 
+        /**
+         * Автоскролл: чтение с автопрокруткой содержимого под рамкой.
+         * @param dir +1 — вниз (читать дальше), −1 — вверх (назад).
+         *             Темп задаёт сканер: свайп — только когда кадр
+         *             прочитан, ничего не пропускается.
+         */
+        void onAutoScroll(int dir);
+
         void onCancel();
     }
 
@@ -55,6 +63,8 @@ public class ZoneSelectorView extends View {
 
     private final Rect btnAccept = new Rect();
     private final Rect btnAuto = new Rect();
+    private final Rect btnScrollDown = new Rect();
+    private final Rect btnScrollUp = new Rect();
     private final Rect btnWhole = new Rect();
     private final Rect btnReset = new Rect();
     private final Rect btnCancel = new Rect();
@@ -143,31 +153,47 @@ public class ZoneSelectorView extends View {
 
         if (zone != null && !zone.isEmpty()) {
             /*
-             * Главное действие («Читать») выделено белой заливкой: когда
-             * рамка уже стоит, из трёх кнопок нужна почти всегда одна, и
-             * искать её глазами не должно быть нужно.
+             * Ряд: «Читать» (главное, широкое) + «Авто ↓»/«Авто ↑» +
+             * «Отмена». «Заново» ушёл: рамку можно просто перерисовать
+             * поверх — а автоскролл нужен чаще (правило 09.10: «кнопка
+             * автоскрола, вниз или вверх, с максимальным темпом»).
              */
-            int wide = (w - pad * 2) * 62 / 100;
+            int wide = (w - pad * 2) * 46 / 100;
+            int rest = (w - pad * 5 - wide) / 3;
             btnAccept.set(pad, y, pad + wide, y + bh);
-            int rest = w - pad * 3 - wide;
-            btnReset.set(pad * 2 + wide, y, pad * 2 + wide + rest / 2, y + bh);
-            btnCancel.set(pad * 2 + wide + rest / 2 + pad / 2, y, w - pad, y + bh);
+            btnScrollDown.set(pad * 2 + wide, y, pad * 2 + wide + rest, y + bh);
+            btnScrollUp.set(pad * 3 + wide + rest, y,
+                    pad * 3 + wide + rest * 2, y + bh);
+            btnCancel.set(w - pad - rest, y, w - pad, y + bh);
             btnAuto.setEmpty();
             btnWhole.setEmpty();
+            btnReset.setEmpty();
 
             drawButton(c, btnAccept, "Читать область", true);
-            drawButton(c, btnReset, "Заново", false);
+            drawButton(c, btnScrollDown, "Авто ↓", false);
+            drawButton(c, btnScrollUp, "Авто ↑", false);
             drawButton(c, btnCancel, "Отмена", false);
         } else {
-            int third = (w - pad * 4) / 3;
-            btnAuto.set(pad, y, pad + third, y + bh);
-            btnWhole.set(pad * 2 + third, y, pad * 2 + third * 2, y + bh);
-            btnCancel.set(pad * 3 + third * 2, y, w - pad, y + bh);
+            /*
+             * Ряд из пяти: «Подобрать» «Весь экран» «Авто ↓» «Авто ↑»
+             * «Отмена» — автоскролл доступен и без рамки (читает весь
+             * экран с прокруткой).
+             */
+            int fifth = (w - pad * 6) / 5;
+            btnAuto.set(pad, y, pad + fifth, y + bh);
+            btnWhole.set(pad * 2 + fifth, y, pad * 2 + fifth * 2, y + bh);
+            btnScrollDown.set(pad * 3 + fifth * 2, y,
+                    pad * 3 + fifth * 3, y + bh);
+            btnScrollUp.set(pad * 4 + fifth * 3, y,
+                    pad * 4 + fifth * 4, y + bh);
+            btnCancel.set(pad * 5 + fifth * 4, y, w - pad, y + bh);
             btnAccept.setEmpty();
             btnReset.setEmpty();
 
             drawButton(c, btnAuto, "Подобрать", true);
             drawButton(c, btnWhole, "Весь экран", false);
+            drawButton(c, btnScrollDown, "Авто ↓", false);
+            drawButton(c, btnScrollUp, "Авто ↑", false);
             drawButton(c, btnCancel, "Отмена", false);
         }
     }
@@ -212,6 +238,14 @@ public class ZoneSelectorView extends View {
         }
         if (hit(btnAccept, x, y)) {
             if (listener != null && zone != null) listener.onZoneChosen(new Rect(zone));
+            return true;
+        }
+        if (hit(btnScrollDown, x, y)) {
+            if (listener != null) listener.onAutoScroll(+1);
+            return true;
+        }
+        if (hit(btnScrollUp, x, y)) {
+            if (listener != null) listener.onAutoScroll(-1);
             return true;
         }
         if (hit(btnReset, x, y)) {

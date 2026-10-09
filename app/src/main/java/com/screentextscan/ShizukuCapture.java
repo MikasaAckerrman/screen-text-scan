@@ -135,17 +135,23 @@ public final class ShizukuCapture {
     public static Bitmap capture(Context ctx) {
         ICaptureService s = service;
         if (s == null) return null;
-        File f = new File(ctx.getExternalFilesDir(null), "shizuku_cap.png");
+        File raw = new File(ctx.getExternalFilesDir(null), "shizuku_cap.raw");
         try {
-            String path = s.screencap(f.getAbsolutePath());
+            String path = s.screencap(raw.getAbsolutePath());
             if (path == null) return null;
-            Bitmap bmp = BitmapFactory.decodeFile(path);
-            return bmp;
+            Bitmap bmp = RootCapture.decodeRawFile(raw);
+            if (bmp != null) return bmp;
+            // Редкий формат экрана: резервный PNG-вариант.
+            File png = new File(ctx.getExternalFilesDir(null), "shizuku_cap.png");
+            String p2 = s.screencap(png.getAbsolutePath());
+            if (p2 == null) return null;
+            return BitmapFactory.decodeFile(png.getAbsolutePath());
         } catch (Throwable t) {
             android.util.Log.d("ScreenTextScan", "shizuku capture: " + t);
             return null;
         } finally {
-            f.delete();  // кадр прочитан — файл не копим
+            raw.delete();
+            new File(ctx.getExternalFilesDir(null), "shizuku_cap.png").delete();
         }
     }
 
