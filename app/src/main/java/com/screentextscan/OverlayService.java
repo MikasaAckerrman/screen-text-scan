@@ -428,11 +428,15 @@ public class OverlayService extends Service {
             return START_NOT_STICKY;
         }
         if (ACTION_DUMP.equals(action)) {
-            scanThread.execute(() -> {
-                ScanAccessibilityService svc = ScanAccessibilityService.get();
-                if (svc != null) svc.dumpCandidates();
-                ui.post(this::stopSelf);
-            });
+            try {
+                scanThread.execute(() -> {
+                    ScanAccessibilityService svc = ScanAccessibilityService.get();
+                    if (svc != null) svc.dumpCandidates();
+                    ui.post(this::stopSelf);
+                });
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                // пул закрыт — приложение останавливается, дамп не нужен
+            }
             return START_NOT_STICKY;
         }
         if (zoneView == null && bubble == null) showZoneSelector();
@@ -461,7 +465,8 @@ public class OverlayService extends Service {
      */
     private void probe() {
         final Rect z = zone;
-        scanThread.execute(() -> {
+        try {
+            scanThread.execute(() -> {
             ScanAccessibilityService svc = ScanAccessibilityService.get();
             int before = -1;
             String pkg = null;
@@ -489,6 +494,9 @@ public class OverlayService extends Service {
             ScanAccessibilityService.setScanSubscription(false);
             ui.post(this::stopSelf);
         });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // пул закрыт — сервис останавливается, проба не нужна
+        }
     }
 
     /** Обрезки первых трёх строк для диагностического лога. */
@@ -702,7 +710,22 @@ public class OverlayService extends Service {
     private void schedulePoll(final int gen) {
         if (!scanning || gen != scanGeneration) return;
         long delay = firstPoll ? 0 : (scanningPackage == null ? PRE_LOCK_MS : POLL_MS);
-        ui.postDelayed(() -> scanThread.execute(() -> pollBody(gen)), delay);
+        ui.postDelayed(() -> {
+            /*
+             * ГОНКА ОСТАНОВКИ (краш 09.10 12:28/12:43, «не работает вообще»):
+             * этот колбэк уже сидел в очереди, когда скан остановился и
+             * пул закрылся (shutdown) — execute кидал
+             * RejectedExecutionException, процесс умирал, служба
+             * доступности падала в Crashed, плитка вела в настройки.
+             * Пул закрыт = скан закончен = молча выходим (gen-проверка
+             * в pollBody его самого бы не пустила, но execute раньше).
+             */
+            try {
+                scanThread.execute(() -> pollBody(gen));
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                // скан уже остановлен — нормальный конец
+            }
+        }, delay);
     }
 
     private boolean firstPoll;
@@ -1207,7 +1230,9 @@ public class OverlayService extends Service {
             final String text = acc.text();
             final int kept = acc.keptSize();
             acc.clear();
-            scanThread.execute(() -> saveToFile(text));
+            try {
+                scanThread.execute(() -> saveToFile(text));
+            } catch (java.util.concurrent.RejectedExecutionException ignored) { }
             Toast.makeText(this, "Строк: " + kept + " — сохранение…",
                     Toast.LENGTH_SHORT).show();
             if (bubble != null && bubbleParams != null) {
@@ -1272,8 +1297,11 @@ public class OverlayService extends Service {
 
     private void copyToClipboard(final String text, final int kept) {
         // Диск — в фон: запись файла на главном потоке стопорила
-        // интерфейс («лагает, когда нажимаешь»).
-        scanThread.execute(() -> saveToFile(text));
+        // интерфейс («лагает, когда наживаешь»). Гвард: пул может быть
+        // уже закрыт остановкой (краш 09.10 — тот же класс).
+        try {
+            scanThread.execute(() -> saveToFile(text));
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
         android.content.ClipboardManager cm =
                 (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         cm.setPrimaryClip(android.content.ClipData.newPlainText(
