@@ -131,9 +131,10 @@ public class OverlayService extends Service {
     /* ================================================================
        Vision-режим: чтение ВСЕГО экрана, когда дерево доступности
        молчит (canvas, игры, битмапы — интерфейсы без текста в a11y).
+       Источники кадра: Shizuku UserService → ROOT su (каскад без
+       системных диалогов; MediaProjection удалён).
        ================================================================ */
 
-    private final ScreenCaptureManager capture = new ScreenCaptureManager();
     private final OcrEngine ocr = new OcrEngine();
     /** Сколько опросов подряд окно не отдало ни одной строки. */
     private int silentPolls;
@@ -151,7 +152,7 @@ public class OverlayService extends Service {
      */
     private static final long OCR_MIN_INTERVAL_MS = 600;
     private long lastOcrAt;
-    /** Пустые захваты Shizuku подряд — 3 = уходим на MediaProjection. */
+    /** Пустые захваты Shizuku подряд — 3 = лог и перепривязка бинда. */
     private int shizukuFails;
 
     /**
@@ -184,45 +185,19 @@ public class OverlayService extends Service {
             return;
         }
         /*
-         * Shizuku мёртв — MediaProjection-фолбэк с авто-кликом (v1.22):
-         * диалог мелькнёт и подтвердится сам.
+         * Shizuku мёртв — ROOT-путь (su screencap, uid 0): без системных
+         * диалогов. MediaProjection удалён из архитектуры: его системный
+         * диалог «в каком приложении снимать» — источник жалобы.
          */
+        if (RootCapture.hasRoot()) {
+            visionActive = true;
+            android.util.Log.d("ScreenTextScan",
+                    "vision: активен ROOT screencap (su, без диалогов)");
+            return;
+        }
+        // Ни Shizuku, ни root: остаётся дерево доступности (уже читает).
         android.util.Log.d("ScreenTextScan",
-                "vision: Shizuku недоступен — фолбэк MediaProjection");
-        ScanAccessibilityService svc = ScanAccessibilityService.get();
-        if (svc != null) svc.armAutoGrant();
-        capture.requestGrant(this, granted -> { /* доставит deliverVisionGrant */ });
-    }
-
-    /** Разрешение получено (из VisionGrantActivity через deliverVisionGrant). */
-    private void onVisionGranted(int resultCode, android.content.Intent data) {
-        ui.post(() -> {
-            /*
-             * Проверка ЗДЕСЬ, внутри post: согласие могло прийти уже после
-             * остановки скана — тогда токен не активируем вовсе, иначе
-             * проекция осталась бы висеть без хозяина (утечка до смерти
-             * процесса).
-             */
-            if (!scanning) return;
-            /*
-             * ТИП mediaProjection поднимается ЗДЕСЬ — ПОСЛЕ согласия
-             * пользователя: только теперь система считает нас владельцем
-             * project_media, и startForeground с этим типом легален на
-             * Vivo/OriginOS (до согласия он валит сервис сразу).
-             */
-            if (Build.VERSION.SDK_INT >= 29) {
-                try {
-                    startForeground(NOTIF_ID, buildNotification(
-                                    "Читаю экран распознаванием"),
-                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-                } catch (RuntimeException e) {
-                    android.util.Log.d("ScreenTextScan", "vision: тип FGS: " + e);
-                }
-            }
-            capture.start(this, resultCode, data);
-            visionActive = capture.isReady();
-            android.util.Log.d("ScreenTextScan", "vision: active=" + visionActive);
-        });
+                "vision: Shizuku и root недоступны — чтение деревом");
     }
 
     /**
@@ -233,26 +208,30 @@ public class OverlayService extends Service {
      */
     private List<ScanAccessibilityService.Line> visionRead() {
         /*
-         * ИСТОЧНИК: Shizuku UserService screencap (без диалога, основной);
-         * MediaProjection+ImageReader — фолбэк, если Shizuku недоступен.
+         * ИСТОЧНИКИ — КАСКАД БЕЗ ДИАЛОГОВ (правило пользователя 09.10:
+         * «без разрешения сразу работало и снимала с экрана во всех
+         * приложениях», у нас есть root):
+         *   1. Shizuku UserService screencap (shell) — основной;
+         *   2. ROOT su -c screencap (uid 0) — когда Shizuku не поднялся
+         *      (бинд асинхронный/сервер перезапущен); разовый вопрос
+         *      SukiSU «Всегда разрешать» — не системный диалог;
+         *   3. дерево доступности — уже работает параллельно.
+         * MediaProjection-путь УДАЛЁН: именно он показывал системный
+         * диалог «в каком приложении снимать/записать».
          */
         android.graphics.Bitmap bmp = ShizukuCapture.capture(this);
         if (bmp == null) {
-            /*
-             * Подстраховка связки:UserService может не подняться (старый
-             * сервер, битый AIDL) — 3 пустых захвата подряд, и уходим на
-             * MediaProjection-фолбэк с автокликом, чтобы скан не молчал.
-             */
+            // Shizuku не готов: попробовать переподнять биндинг и взять
+            // кадр root'ом — молча, без единого системного окна.
+            if (!ShizukuCapture.isBound() && ShizukuCapture.isGranted()) {
+                ui.post(() -> ShizukuCapture.bind(this));
+            }
             if (++shizukuFails >= 3) {
                 shizukuFails = 0;
                 android.util.Log.d("ScreenTextScan",
-                        "vision: Shizuku не поднимается — фолбэк MediaProjection");
-                ScanAccessibilityService svc = ScanAccessibilityService.get();
-                if (svc != null) svc.armAutoGrant();
-                capture.requestGrant(this, granted -> { });
-                return null;
+                        "vision: Shizuku не поднялся — кадр через ROOT (su screencap)");
             }
-            bmp = visionActive ? capture.capture() : null;
+            bmp = RootCapture.capture(this);
         } else {
             shizukuFails = 0;
         }
@@ -312,12 +291,6 @@ public class OverlayService extends Service {
 
     /** Живой экземпляр сервиса; экран результата берёт из него снапшот. */
     private static OverlayService instance;
-
-    /** Данные разрешения на захват экрана из активити-посредника. */
-    static void deliverVisionGrant(int resultCode, android.content.Intent data) {
-        OverlayService s = instance;
-        if (s != null) s.onVisionGranted(resultCode, data);
-    }
 
     /** Слушатель выдачи разрешения Shizuku (снимает в onDestroy). */
     private final Shizuku.OnRequestPermissionResultListener grantListener =
@@ -785,7 +758,7 @@ public class OverlayService extends Service {
                 List<ScanAccessibilityService.Line> lines = null;
                 /*
                  * ИСТОЧНИК СНИМКА — Shizuku (screencap без диалогов).
-                 * MediaProjection — только фолбэк, когда Shizuku умер.
+                 * ROOT (su) — вторая линия, когда Shizuku умер.
                  * При живом захвате читаем ТОЛЬКО снимком: ровно то, что
                  * видит пользователь (ни offscreen-мусора дерева, ни
                  * слепоты на canvas). Скролл честен: каждый screencap —
@@ -1377,10 +1350,6 @@ public class OverlayService extends Service {
         silentPolls = 0;
         // UserService Shizuku больше не нужен — отпустить (кадры не копим).
         try { ShizukuCapture.unbind(this); } catch (Throwable ignored) { }
-        // Проекция экрана больше не нужна: токен живёт до конца скана,
-        // следующий попросит разрешение заново (правило конфиденциальности
-        // MediaProjection).
-        ui.post(() -> capture.stop());
         ocr.release();
         // Поколение++: летящие из фонового потока результаты старого
         // скана отбрасываются, новый цикл начнётся со своего номера.

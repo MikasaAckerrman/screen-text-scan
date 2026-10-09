@@ -61,13 +61,12 @@ check(len(danger) == 0,
 check("readScreen(zone" not in src and "readScreen(null, screenW" not in src,
       "нет вызовов readScreen без targetPkg (привязка обязательна)")
 
-# --- 4. mediaProjection-тип — только после согласия ------------------
-grant = re.search(r"private void onVisionGranted.*?\n    \}", src, re.S)
-start = re.search(r"public void onCreate\(\).*?\n    \}", src, re.S)
-check(bool(grant) and "FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION" in grant.group(0),
-      "тип mediaProjection поднимается в onVisionGranted (после согласия)")
-check(bool(start) and "MEDIA_PROJECTION" not in start.group(0),
-      "onCreate НЕ стартует с mediaProjection (краш на Vivo 01.10)")
+# --- 4. MediaProjection ПОЛНОСТЬЮ удалён (источник диалога) ---------
+# Проверяются ВЫЗОВЫ API, не слова: в комментариях история остаётся.
+api_calls = re.findall(r"capture\.(?:requestGrant|start|stop|capture)\(", raw)
+check(len(api_calls) == 0 and "FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION" not in src,
+      f"MediaProjection-API не вызывается (диалог невозможен) — вызовов: {len(api_calls)}")
+check("RootCapture" in src, "ROOT-путь (su screencap) встроен как вторая линия")
 
 # --- 5. IME не переключает скан --------------------------------------
 check("isImePackage" in src, "клавиатура детектится по типу окна (isImePackage)")
