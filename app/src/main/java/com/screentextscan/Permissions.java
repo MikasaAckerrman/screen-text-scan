@@ -43,17 +43,44 @@ public final class Permissions {
     }
 
     /**
-     * Служба доступности включена в системных настройках.
+     * Служба доступности включена.
      *
-     * Именно «включена в настройках», а не «уже подключилась к процессу»:
-     * второе бывает ложно-отрицательным сразу после старта процесса.
+     * ДВА ИСТОЧНИКА, И ПОЧЕМУ ИМЕННО ТАК. Строковая настройка
+     * ENABLED_ACCESSIBILITY_SERVICES на OriginOS после обновления
+     * приложения остаётся пустой (null) при живой, подключённой службе —
+     * проверка по строке врала, и плитка/переходник уводили в настройки
+     * («меня просто перебрасывает в приложение», 09.10). Живой источник —
+     * AccessibilityManager: список включённых служб читается из того же
+     * состояния, что видит dumpsys accessibility. Строка — запасной
+     * (для случаев, когда менеджер ещё не знает о службе).
      */
     public static boolean isAccessibilityEnabled(Context c) {
+        // 1) Живой список системы.
+        try {
+            android.view.accessibility.AccessibilityManager am =
+                    (android.view.accessibility.AccessibilityManager)
+                            c.getSystemService(Context.ACCESSIBILITY_SERVICE);
+            if (am != null) {
+                ComponentName mine = new ComponentName(c, ScanAccessibilityService.class);
+                for (android.accessibilityservice.AccessibilityServiceInfo si
+                        : am.getEnabledAccessibilityServiceList(
+                                android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
+                    ComponentName cn = ComponentName.unflattenFromString(si.getId());
+                    if (cn != null
+                            && cn.getPackageName().equals(mine.getPackageName())
+                            && cn.getClassName().equals(mine.getClassName())) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // менеджер недоступен — проверим строкой
+        }
+        // 2) Строка настроек (запасной).
         ComponentName mine = new ComponentName(c, ScanAccessibilityService.class);
         String enabled = Settings.Secure.getString(c.getContentResolver(),
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
         if (TextUtils.isEmpty(enabled)) return false;
-
         for (String part : enabled.split(":")) {
             ComponentName cn = ComponentName.unflattenFromString(part.trim());
             if (cn == null) continue;
@@ -66,11 +93,12 @@ public final class Permissions {
     }
 
     /**
-     * Общий выключатель доступности. Проверяем отдельно: бывает, что служба
-     * в списке есть, а доступность выключена целиком — тогда она не работает,
-     * и сообщать надо именно об этом, иначе человек ищет проблему не там.
+     * Общий выключатель доступности. На OriginOS флаг может отставать от
+     * реального состояния (служба подключена — флаг 0): живой список
+     * перекрывает. Запасной путь — прежняя проверка по настройке.
      */
     public static boolean isAccessibilityMasterOn(Context c) {
+        if (isAccessibilityEnabled(c)) return true;
         /*
          * Используем перегрузку С ДЕФОЛТОМ. Двухаргументная getInt бросает
          * проверяемый SettingNotFoundException — это обнаружила полная
