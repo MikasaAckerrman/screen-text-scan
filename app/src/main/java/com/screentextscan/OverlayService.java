@@ -177,6 +177,13 @@ public class OverlayService extends Service {
      */
     private void doAutoSwipe() {
         if (swipeInFlight || autoScrollDir == 0) return;
+        if (!RootCapture.hasRoot()) {
+            // Автоскролл без root невозможен: свайпить содержимое чужого
+            // приложения умеет только root. Не молчим — говорим.
+            autoScrollDir = 0;
+            updateNotification("Автоскролл требует root (KernelSU). Читаю без прокрутки.");
+            return;
+        }
         Rect r = zone != null ? new Rect(zone)
                 : new Rect(0, 0, screenW, screenH);
         int x = r.left + r.width() / 4;
@@ -200,9 +207,15 @@ public class OverlayService extends Service {
                         + " " + x + " " + yTo + " 220");
             } finally {
                 swipeInFlight = false;
+                // Окно тишины: список докатывается ~350 мс после свайпа,
+                // OCR в движении читает размытый мусор.
+                swipeQuietUntil = System.currentTimeMillis() + 350;
             }
         }, "sts-swipe").start();
     }
+
+    /** До этого момента кадры не берём: идёт прокрутка (размытие). */
+    private volatile long swipeQuietUntil;
 
     /**
      * Окно молчит несколько опросов — включить чтение экрана снимками.
@@ -870,9 +883,20 @@ public class OverlayService extends Service {
                  * интервал), отдельный gate не нужен.
                  */
                 if (visionActive) {
-                    List<ScanAccessibilityService.Line> seen = visionRead();
-                    if (seen != null) {
-                        lines = seen;
+                    /*
+                     * Окно тишины автоскролла: во время прокрутки и ~350 мс
+                     * после неё кадр размыт — OCR читал бы мусор, который
+                     * дедуп не выловит (другой текст). Пропускаем кадр.
+                     */
+                    if (System.currentTimeMillis() >= swipeQuietUntil) {
+                        List<ScanAccessibilityService.Line> seen = visionRead();
+                        if (seen != null) {
+                            lines = seen;
+                        }
+                    } else {
+                        // Кадр пропущен (движение) — но цикл жив, накопление
+                        // продолжится после доката.
+                        lines = null;
                     }
                 }
                 if (!visionActive) {

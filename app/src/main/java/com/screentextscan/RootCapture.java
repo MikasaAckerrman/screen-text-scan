@@ -30,26 +30,36 @@ public final class RootCapture {
 
     /** Кеш «su доступен приложению» (проверяется один раз). */
     private static volatile int suState = 0;  // 0 — неизвестно, 1 — да, -1 — нет
+    /** Последняя неудачная проверка su: ретрай каждые 30 с (самолечение —
+     *  грант KernelSU может быть выдан ПОСЛЕ старта приложения). */
+    private static volatile long lastRootDeny;
 
     /**
-     * Есть ли у приложения root? Однократная проверка «su -c id»:
-     * выданный root запоминается менеджером, отказ тоже (exit код).
+     * Есть ли у приложения root? Успех кешируется навсегда; отказ
+     * перепроверяется не чаще раза в 30 секунд — если пользователь
+     * выдаст грант KernelSU позже, путь оживёт сам, без перезапуска.
      */
     public static boolean hasRoot() {
         int s = suState;
-        if (s != 0) return s == 1;
+        if (s == 1) return true;
+        if (s == -1) {
+            long now = System.currentTimeMillis();
+            if (now - lastRootDeny < 30_000) return false;
+        }
         try {
             long t0 = android.os.SystemClock.elapsedRealtime();
             Process p = Runtime.getRuntime().exec(
                     new String[]{"su", "-c", "id"});
             boolean ok = p.waitFor() == 0;
             suState = ok ? 1 : -1;
+            if (!ok) lastRootDeny = System.currentTimeMillis();
             android.util.Log.d("ScreenTextScan",
                     "root: su -c id → " + ok + " за "
                             + (android.os.SystemClock.elapsedRealtime() - t0) + "мс");
             return ok;
         } catch (Throwable t) {
             suState = -1;
+            lastRootDeny = System.currentTimeMillis();
             android.util.Log.d("ScreenTextScan", "root: su exec: " + t);
             return false;
         }
