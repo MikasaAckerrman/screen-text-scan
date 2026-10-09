@@ -1005,7 +1005,7 @@ public class OverlayService extends Service {
         final ScanBubbleView fx = bubble;
         bubbleTouch.setOnTouchListener(new View.OnTouchListener() {
             float startX, startY;
-            int origFxX, origFxY, origTx, origTy;
+            int origTx, origTy;
             boolean moved;
             boolean longPressHandled;
             Runnable longPressCallback;
@@ -1017,8 +1017,6 @@ public class OverlayService extends Service {
                     case MotionEvent.ACTION_DOWN:
                         startX = e.getRawX();
                         startY = e.getRawY();
-                        origFxX = bubbleParams.x;
-                        origFxY = bubbleParams.y;
                         origTx = touchParams.x;
                         origTy = touchParams.y;
                         moved = false;
@@ -1083,7 +1081,6 @@ public class OverlayService extends Service {
                                 Math.max(0, screenH - ts));
                         v.setTranslationX(nx - origTx);
                         v.setTranslationY(ny - origTy);
-                        int off = (bubbleParams.width - ts) / 2;
                         fx.setTranslationX(nx - origTx);
                         fx.setTranslationY(ny - origTy);
                         return true;
